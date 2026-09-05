@@ -408,26 +408,8 @@ class QueueManager:
             return ""
         return uri.split(":")[-1].split("/")[-1].split("?")[0]
 
-    def _get_playlist_sort(self, playlist_id):
-        files = glob.glob(os.path.expanduser("~/.cache/spotify/Browser/Local Storage/leveldb/*.log"))
-        for f in files:
-            try:
-                with open(f, "rb") as fp:
-                    d = fp.read()
-                for m in re.finditer(rb"sortedState[^\x00\{]*(\{.*?\}(?=\x01|\x00|[A-Za-z_]+\x01))", d):
-                    try:
-                        obj = json.loads(m.group(1).decode("utf-8"))
-                        key = "spotify:playlist:" + playlist_id
-                        if key in obj:
-                            return obj[key]
-                    except:
-                        pass
-            except:
-                pass
-        return None
-
     def _extract_playlist_from_ldb(self, playlist_id):
-        """Extracts all tracks directly from Spotify's LevelDB slice in real sorted order."""
+        """Extracts all tracks directly from Spotify's LevelDB slice in real authentic sequence."""
         files = glob.glob(os.path.expanduser("~/.cache/spotify/Users/*-user/primary.ldb/*"))
         target = ("1!pl#slc#\x27spotify:playlist:" + playlist_id + "#").encode("utf-8")
 
@@ -458,14 +440,6 @@ class QueueManager:
             if tid not in seen:
                 seen.add(tid)
                 entries.append({"tid": tid, "uri": "spotify:track:" + tid, "added_at": added_at})
-
-        # Apply user sort order (e.g. Date added DESC)
-        sort_info = self._get_playlist_sort(playlist_id)
-        if sort_info and sort_info.get("field") == "ADDED_AT":
-            if sort_info.get("order") == "DESC":
-                entries = sorted(entries, key=lambda x: x["added_at"], reverse=True)
-            elif sort_info.get("order") == "ASC":
-                entries = sorted(entries, key=lambda x: x["added_at"])
 
         # Set 1-based playlist index
         for idx, e in enumerate(entries):
