@@ -699,7 +699,7 @@ class SpotifyMiniWindow(Gtk.Window):
         GLib.timeout_add(16, self._on_tick)
         GLib.timeout_add(200, self._on_fast_sync)
         GLib.timeout_add(200, self._on_poll_window_state)
-        GLib.timeout_add(150, self._on_periodic_queue_check)
+        GLib.timeout_add(300, self._on_periodic_queue_check)
 
     def _on_periodic_queue_check(self):
         if self.mpris.is_available:
@@ -824,6 +824,7 @@ class SpotifyMiniWindow(Gtk.Window):
             self._cancel_fade()
             self.set_opacity(1.0)
             self.queue_mgr.check_for_updates()
+            self._rebuild_queue_ui(order_changed=False)
             self.queue_revealer.set_reveal_child(True)
             GLib.idle_add(self._scroll_to_current_track)
             GLib.timeout_add(60, self._scroll_to_current_track)
@@ -832,6 +833,7 @@ class SpotifyMiniWindow(Gtk.Window):
             if not self.is_pinned and not self.is_hovered:
                 self._schedule_hide(4500)
         else:
+            self.hide_queue_loading()
             self.queue_btn.remove_css_class("queue-active")
             self.queue_revealer.set_reveal_child(False)
             if not self.is_pinned and not self.is_hovered:
@@ -1030,7 +1032,7 @@ class SpotifyMiniWindow(Gtk.Window):
             GLib.timeout_add(120, _suppress)
             GLib.timeout_add(300, _restore_opacity)
 
-    def show_queue_loading(self, duration_ms=450):
+    def show_queue_loading(self, duration_ms=6000):
         if not hasattr(self, "queue_loading_box") or not self.queue_loading_box:
             return
         self.queue_loading_lbl.set_text(t("updating"))
@@ -1041,19 +1043,24 @@ class SpotifyMiniWindow(Gtk.Window):
             self._hide_loading_timer = None
 
         def _hide():
-            if hasattr(self, "queue_spinner") and self.queue_spinner:
-                self.queue_spinner.stop()
-            if hasattr(self, "queue_loading_box") and self.queue_loading_box:
-                self.queue_loading_box.set_visible(False)
-            self._hide_loading_timer = None
+            self.hide_queue_loading()
             return False
 
+        # Safety fallback only; spinner is normally hidden explicitly when UI unfreezes
         self._hide_loading_timer = GLib.timeout_add(duration_ms, _hide)
+
+    def hide_queue_loading(self):
+        if getattr(self, "_hide_loading_timer", None):
+            GLib.source_remove(self._hide_loading_timer)
+            self._hide_loading_timer = None
+        if hasattr(self, "queue_spinner") and self.queue_spinner:
+            self.queue_spinner.stop()
+        if hasattr(self, "queue_loading_box") and self.queue_loading_box:
+            self.queue_loading_box.set_visible(False)
 
     def _rebuild_queue_ui(self, order_changed=False):
         """Debounced entry point: coalesces rapid back-to-back calls into one rebuild.
         Shows spinner + freezes list immediately, then fires real rebuild after 50ms."""
-        # Accumulate order_changed across coalesced calls
         self._rebuild_order_changed = getattr(self, "_rebuild_order_changed", False) or order_changed
 
         # Cancel any previously scheduled rebuild
@@ -1061,9 +1068,9 @@ class SpotifyMiniWindow(Gtk.Window):
             GLib.source_remove(self._rebuild_pending_id)
             self._rebuild_pending_id = None
 
-        # Show spinner + freeze list right away (before the 50ms wait)
+        # Show spinner + freeze list right away so no partial state is visible
         if getattr(self, "is_queue_open", False):
-            self.show_queue_loading(duration_ms=5000)  # safety net; hidden manually when done
+            self.show_queue_loading(duration_ms=6000)
             if hasattr(self, "queue_list_box") and self.queue_list_box:
                 self.queue_list_box.set_opacity(0.0)
 
@@ -1075,7 +1082,7 @@ class SpotifyMiniWindow(Gtk.Window):
         self._rebuild_pending_id = None
         oc = getattr(self, "_rebuild_order_changed", False)
         self._rebuild_order_changed = False
-        self._do_rebuild_queue_ui(oc)
+        self._do_rebuild_queue_ui(order_changed=oc)
         return False
 
     def _do_rebuild_queue_ui(self, order_changed=False):
@@ -1312,20 +1319,13 @@ class SpotifyMiniWindow(Gtk.Window):
                 GLib.idle_add(_restore_scroll)
                 GLib.timeout_add(50, _restore_scroll)
 
-        # Reveal the rebuilt list atomically and hide spinner at the same moment
-        def _show_list():
+        # Reveal the rebuilt list atomically and hide spinner at the exact same moment
+        def _show_list_and_hide_spinner():
             if hasattr(self, "queue_list_box") and self.queue_list_box:
                 self.queue_list_box.set_opacity(1.0)
-            # Hide spinner exactly now (not on a fixed timer)
-            if hasattr(self, "_hide_loading_timer") and self._hide_loading_timer:
-                GLib.source_remove(self._hide_loading_timer)
-                self._hide_loading_timer = None
-            if hasattr(self, "queue_spinner") and self.queue_spinner:
-                self.queue_spinner.stop()
-            if hasattr(self, "queue_loading_box") and self.queue_loading_box:
-                self.queue_loading_box.set_visible(False)
+            self.hide_queue_loading()
             return False
-        GLib.idle_add(_show_list)
+        GLib.idle_add(_show_list_and_hide_spinner)
 
     def _on_poll_window_state(self):
         if getattr(self, "_switching_track", False):
@@ -1753,7 +1753,7 @@ class SpotifyMiniWindow(Gtk.Window):
             self.scale.set_value(0)
             self.pos_label.set_text("00:00")
 
-            # Update current track in queue — notify() inside will trigger _rebuild_queue_ui
+            # Update current track in queue (notify inside will trigger debounced _rebuild_queue_ui)
             self.queue_mgr.update_current_track(self.mpris.title, self.mpris.artist, self.mpris.track_id, album=self.mpris.album)
         else:
             fresh_us = self.mpris.get_fresh_position()

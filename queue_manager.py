@@ -275,6 +275,20 @@ class QueueManager:
             if needs_refresh:
                 fresh_tracks = self._extract_playlist_from_ldb(pid)
                 if fresh_tracks:
+                    # Compare track sequence to avoid phantom UI refreshes during normal playback
+                    old_tids = [t.get("tid") for t in self.all_context_tracks]
+                    new_tids = [t.get("tid") for t in fresh_tracks]
+                    if not sort_changed and old_tids == new_tids:
+                        # Tracks and order did not change at all. Quietly update metadata in place:
+                        with self._lock:
+                            for i, t in enumerate(self.all_context_tracks):
+                                ft = fresh_tracks[i]
+                                if not t.get("title") or t.get("title") in ("Трек", "Track"):
+                                    t["title"] = ft.get("title", t.get("title"))
+                                if not t.get("artist") or t.get("artist") == "Spotify":
+                                    t["artist"] = ft.get("artist", t.get("artist"))
+                        return
+
                     for t in fresh_tracks:
                         tid = t.get("tid")
                         cached = self._lookup_track_meta(tid)
@@ -290,7 +304,7 @@ class QueueManager:
                             if new_idx >= 0:
                                 self.current_track["track_num"] = new_idx + 1
                                 self.last_valid_idx = new_idx
-                    self.notify(order_changed=sort_changed)
+                    self.notify(order_changed=True)
         except Exception as e:
             print(f"Error checking for playlist updates: {e}")
 
