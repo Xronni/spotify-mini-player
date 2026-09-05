@@ -1051,12 +1051,17 @@ class SpotifyMiniWindow(Gtk.Window):
         self._hide_loading_timer = GLib.timeout_add(duration_ms, _hide)
 
     def _rebuild_queue_ui(self, order_changed=False):
-        # Always show loading spinner and freeze the list visually
-        # to prevent partial/flickering redraws during rebuild
-        self.show_queue_loading(duration_ms=400)
-        if hasattr(self, "queue_list_box") and self.queue_list_box:
-            self.queue_list_box.set_opacity(0.0)
+        """Entry point: show spinner + freeze list immediately, then do rebuild next GTK frame
+        so the spinner is actually rendered before we clear/rebuild rows."""
+        if getattr(self, "is_queue_open", False):
+            self.show_queue_loading(duration_ms=700)
+            if hasattr(self, "queue_list_box") and self.queue_list_box:
+                self.queue_list_box.set_opacity(0.0)
+        # Schedule real rebuild for the next frame (spinner renders first)
+        GLib.idle_add(lambda: self._do_rebuild_queue_ui(order_changed) or False)
 
+    def _do_rebuild_queue_ui(self, order_changed=False):
+        """Actual queue rebuild logic — always called via idle_add after spinner is shown."""
         vadj = self.queue_scroll.get_vadjustment() if hasattr(self, "queue_scroll") and self.queue_scroll else None
         saved_scroll_y = vadj.get_value() if vadj else 0.0
 

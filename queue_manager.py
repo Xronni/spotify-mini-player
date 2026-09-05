@@ -1109,6 +1109,7 @@ class QueueManager:
                     res = []
                     for idx, t in enumerate(track_list):
                         tid = self._extract_id(t.get("uri", ""))
+                        title_str = (t.get("title") or "").strip()
                         artist_str = (t.get("subtitle") or "").strip()
                         if artist_str.casefold() == "spotify":
                             artist_str = ""
