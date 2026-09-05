@@ -316,7 +316,7 @@ class SpotifyMiniWindow(Gtk.Window):
         self.vol_debounce_id = None
         self.shuffle_history = []
         self._switching_track = False
-        self._was_visible_before_spotify = False
+        self._was_pinned_before_spotify = False
 
         # Queue Manager
         self.queue_mgr = QueueManager(on_queue_changed_cb=self._rebuild_queue_ui)
@@ -459,11 +459,18 @@ class SpotifyMiniWindow(Gtk.Window):
         self.raise_btn.connect("clicked", lambda b: self.mpris.raise_spotify())
         right_box.append(self.raise_btn)
 
+        # Minimize button
+        self.min_btn = Gtk.Button.new_from_icon_name("window-minimize-symbolic")
+        self.min_btn.add_css_class("icon-btn")
+        self.min_btn.set_tooltip_text(t("minimize_player"))
+        self.min_btn.connect("clicked", lambda b: self._on_minimize_clicked())
+        right_box.append(self.min_btn)
+
         # Close button
         self.close_btn = Gtk.Button.new_from_icon_name("window-close-symbolic")
         self.close_btn.add_css_class("icon-btn")
-        self.close_btn.set_tooltip_text(t("hide_player"))
-        self.close_btn.connect("clicked", lambda b: self.hide_osd_immediate())
+        self.close_btn.set_tooltip_text(t("close_player"))
+        self.close_btn.connect("clicked", lambda b: self._on_close_clicked())
         right_box.append(self.close_btn)
 
         top_bar.append(right_box)
@@ -1338,16 +1345,17 @@ class SpotifyMiniWindow(Gtk.Window):
             if self.get_visible():
                 self._cancel_hide_timer()
                 self._cancel_fade()
-                self._was_visible_before_spotify = True
-                self.set_visible(False)
+                self._was_pinned_before_spotify = self.is_pinned
                 self._hidden_due_to_spotify = True
+                self.set_visible(False)
         else:
-            # Spotify desktop is minimized or in background
+            # Spotify desktop is minimized or closed
             if getattr(self, "_hidden_due_to_spotify", False):
                 self._hidden_due_to_spotify = False
-                was_vis = getattr(self, "_was_visible_before_spotify", False)
-                # If window was pinned or visible before, restore visibility!
-                if self.is_pinned or was_vis:
+                was_pinned = getattr(self, "_was_pinned_before_spotify", False)
+                self._was_pinned_before_spotify = False
+                # Reopen ONLY if the mini player was pinned! If not pinned, do not reopen.
+                if self.is_pinned and was_pinned:
                     self.set_opacity(1.0)
                     self.set_visible(True)
                     surface = self.get_surface()
@@ -1458,7 +1466,9 @@ class SpotifyMiniWindow(Gtk.Window):
         self.queue_btn.set_tooltip_text(t("queue_tooltip"))
         self.pin_btn.set_tooltip_text(t("pin_on") if self.is_pinned else t("pin_off"))
         self.raise_btn.set_tooltip_text(t("open_spotify"))
-        self.close_btn.set_tooltip_text(t("hide_player"))
+        if hasattr(self, "min_btn"):
+            self.min_btn.set_tooltip_text(t("minimize_player"))
+        self.close_btn.set_tooltip_text(t("close_player"))
         self.prev_btn.set_tooltip_text(t("prev_track"))
         self.play_btn.set_tooltip_text(t("play_pause"))
         self.next_btn.set_tooltip_text(t("next_track"))
@@ -1659,6 +1669,18 @@ class SpotifyMiniWindow(Gtk.Window):
         self._cancel_hide_timer()
         self._cancel_fade()
         self.set_visible(False)
+
+    def _on_minimize_clicked(self, button=None):
+        self.minimize()
+        self.hide_osd_immediate()
+
+    def _on_close_clicked(self, button=None):
+        app = self.get_application()
+        if app:
+            app.quit()
+        else:
+            self.close()
+            sys.exit(0)
 
     def _toggle_pin(self, button):
         self.is_pinned = not self.is_pinned
