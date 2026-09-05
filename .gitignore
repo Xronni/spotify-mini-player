@@ -9,3 +9,7 @@ venv/
 .cache/
 *.log
 .DS_Store
+dist/
+release/
+*.zip
+*.tar.gz
