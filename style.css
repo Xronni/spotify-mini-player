@@ -193,6 +193,16 @@ scale.vol-scale:hover slider {
     background-color: rgba(255, 255, 255, 0.25);
 }
 
+.control-btn.active-control {
+    color: #1ed760;
+    background-color: rgba(30, 215, 96, 0.15);
+}
+
+.control-btn.active-control:hover {
+    color: #24f06e;
+    background-color: rgba(30, 215, 96, 0.25);
+}
+
 /* Prominent Play / Pause Button */
 .play-btn {
     border-radius: 9999px;

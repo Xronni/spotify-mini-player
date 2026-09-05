@@ -323,7 +323,8 @@ class SpotifyMiniWindow(Gtk.Window):
             on_status_cb=self._on_status_updated,
             on_avail_cb=self._on_availability_changed,
             on_media_key_cb=self._on_user_media_action,
-            on_volume_cb=self._on_spotify_volume_changed
+            on_volume_cb=self._on_spotify_volume_changed,
+            on_options_cb=self._on_mpris_options_changed
         )
 
         self._build_ui()
@@ -333,6 +334,7 @@ class SpotifyMiniWindow(Gtk.Window):
         # Initial sync
         self._apply_metadata(track_changed=True)
         self._sync_initial_volume()
+        self._update_playback_options_ui()
         self._rebuild_queue_ui()
 
         # Show initially for 4.5s
@@ -538,9 +540,16 @@ class SpotifyMiniWindow(Gtk.Window):
         right_col.append(slider_box)
 
         # Media Control Buttons
-        controls_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        controls_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         controls_box.set_halign(Gtk.Align.CENTER)
         controls_box.set_margin_top(2)
+
+        # Shuffle
+        self.shuffle_btn = Gtk.Button.new_from_icon_name("media-playlist-shuffle-symbolic")
+        self.shuffle_btn.add_css_class("control-btn")
+        self.shuffle_btn.set_tooltip_text(t("shuffle_disabled"))
+        self.shuffle_btn.connect("clicked", self._on_shuffle_clicked)
+        controls_box.append(self.shuffle_btn)
 
         # Prev
         self.prev_btn = Gtk.Button.new_from_icon_name("media-skip-backward-symbolic")
@@ -562,6 +571,13 @@ class SpotifyMiniWindow(Gtk.Window):
         self.next_btn.set_tooltip_text(t("next_track"))
         self.next_btn.connect("clicked", self.on_user_next_clicked)
         controls_box.append(self.next_btn)
+
+        # Repeat (3 modes)
+        self.repeat_btn = Gtk.Button.new_from_icon_name("media-playlist-repeat-symbolic")
+        self.repeat_btn.add_css_class("control-btn")
+        self.repeat_btn.set_tooltip_text(t("repeat_none"))
+        self.repeat_btn.connect("clicked", self._on_repeat_clicked)
+        controls_box.append(self.repeat_btn)
 
         right_col.append(controls_box)
         self.player_card.append(main_row)
@@ -642,6 +658,12 @@ class SpotifyMiniWindow(Gtk.Window):
         GLib.timeout_add(16, self._on_tick)
         GLib.timeout_add(200, self._on_fast_sync)
         GLib.timeout_add(200, self._on_poll_window_state)
+        GLib.timeout_add(1500, self._on_periodic_queue_check)
+
+    def _on_periodic_queue_check(self):
+        if self.mpris.is_available:
+            self.queue_mgr.check_for_updates()
+        return True
 
     def _sync_initial_volume(self):
         vol = self.mpris.get_volume()
@@ -734,11 +756,7 @@ class SpotifyMiniWindow(Gtk.Window):
                 self._schedule_hide(3500)
 
     def on_user_next_clicked(self, *args):
-        upcoming = self.queue_mgr.get_upcoming_tracks(limit=1)
-        if upcoming:
-            self.play_track_silent(upcoming[0].get("uri"))
-        else:
-            self.mpris.next()
+        self.mpris.next()
 
     def on_user_prev_clicked(self, *args):
         fresh_us = self.mpris.get_fresh_position()
@@ -749,12 +767,7 @@ class SpotifyMiniWindow(Gtk.Window):
             self.scale.set_value(0)
             self.pos_label.set_text("00:00")
             return
-
-        past = self.queue_mgr.get_past_tracks(limit=100)
-        if past:
-            self.play_track_silent(past[-1].get("uri"))
-        else:
-            self.mpris.previous()
+        self.mpris.previous()
 
     def play_track_silent(self, uri):
         if not uri:
@@ -1084,6 +1097,45 @@ class SpotifyMiniWindow(Gtk.Window):
         except Exception as e:
             print(f"Failed to auto-restart: {e}")
 
+    def _on_shuffle_clicked(self, button=None):
+        self.mpris.toggle_shuffle()
+        self._update_playback_options_ui()
+
+    def _on_repeat_clicked(self, button=None):
+        self.mpris.cycle_loop_status()
+        self._update_playback_options_ui()
+
+    def _on_mpris_options_changed(self, shuffle, loop_status):
+        GLib.idle_add(self._update_playback_options_ui)
+
+    def _update_playback_options_ui(self):
+        if not hasattr(self, "shuffle_btn") or not hasattr(self, "repeat_btn"):
+            return
+
+        # 1. Shuffle state
+        is_shuffled = getattr(self.mpris, "shuffle", False)
+        if is_shuffled:
+            self.shuffle_btn.add_css_class("active-control")
+            self.shuffle_btn.set_tooltip_text(t("shuffle_enabled"))
+        else:
+            self.shuffle_btn.remove_css_class("active-control")
+            self.shuffle_btn.set_tooltip_text(t("shuffle_disabled"))
+
+        # 2. Repeat state (3 modes: None, Playlist, Track)
+        loop = getattr(self.mpris, "loop_status", "None")
+        if loop == "Track":
+            self.repeat_btn.set_icon_name("media-playlist-repeat-song-symbolic")
+            self.repeat_btn.add_css_class("active-control")
+            self.repeat_btn.set_tooltip_text(t("repeat_track"))
+        elif loop == "Playlist":
+            self.repeat_btn.set_icon_name("media-playlist-repeat-symbolic")
+            self.repeat_btn.add_css_class("active-control")
+            self.repeat_btn.set_tooltip_text(t("repeat_playlist"))
+        else:
+            self.repeat_btn.set_icon_name("media-playlist-repeat-symbolic")
+            self.repeat_btn.remove_css_class("active-control")
+            self.repeat_btn.set_tooltip_text(t("repeat_none"))
+
     def _update_ui_strings(self):
         self.vol_btn.set_tooltip_text(t("mute_unmute"))
         self.vol_scale.set_tooltip_text(t("spotify_volume"))
@@ -1102,6 +1154,7 @@ class SpotifyMiniWindow(Gtk.Window):
         if hasattr(self, "launch_btn"):
             self.launch_btn.set_label(t("launch_spotify"))
         self._update_volume_icon(self.current_volume)
+        self._update_playback_options_ui()
         self._rebuild_queue_ui()
 
     def _on_mouse_enter(self, controller, x, y):
@@ -1353,34 +1406,6 @@ class SpotifyMiniWindow(Gtk.Window):
             self.last_sync_pos = 0.0
             self.scale.set_value(0)
             self.pos_label.set_text("00:00")
-
-            # Check if Spotify drifted off our active user playlist:
-            if self.queue_mgr.all_context_tracks and self.queue_mgr.context_uri.startswith("spotify:playlist:"):
-                curr_match = self.queue_mgr._find_track_idx(self.mpris.track_id, self.mpris.title)
-                if curr_match == -1:
-                    # The track playing in Spotify is NOT in our active playlist!
-                    tid = self.queue_mgr._extract_id(self.mpris.track_id)
-                    new_pid = self.queue_mgr._find_playlist_for_track(tid) if tid else None
-
-                    # Only allow playlist switch if the user was actively using Spotify on-screen
-                    # and chose a track from another real user playlist
-                    sp_active = is_spotify_active() or is_spotify_on_screen()
-                    if new_pid and sp_active:
-                        pass
-                    else:
-                        # Song finished naturally or Spotify autoplayed an off-playlist track.
-                        # Seamlessly advance to the next track of our playlist:
-                        upcoming = self.queue_mgr.get_upcoming_tracks(limit=1)
-                        if upcoming:
-                            print(f"[AutoAdvance] Song finished / off-playlist track detected. Advancing to playlist track: {upcoming[0].get('title')}")
-                            next_t = upcoming[0]
-                            self.play_track_silent(next_t.get("uri"))
-                            return False
-                        elif getattr(self.mpris, "loop_status", "") == "Playlist":
-                            first_t = self.queue_mgr.all_context_tracks[0]
-                            print(f"[AutoAdvance] Playlist finished with Repeat on. Looping to: {first_t.get('title')}")
-                            self.play_track_silent(first_t.get("uri"))
-                            return False
 
             # Update current track in queue
             self.queue_mgr.update_current_track(self.mpris.title, self.mpris.artist, self.mpris.track_id, album=self.mpris.album)

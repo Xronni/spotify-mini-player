@@ -34,6 +34,11 @@ MESSAGES = {
         "mute_unmute": "Mute / Unmute",
         "spotify_volume": "Spotify Volume",
         "focus_spotify": "Click to focus Spotify",
+        "shuffle_enabled": "Shuffle: On",
+        "shuffle_disabled": "Shuffle: Off",
+        "repeat_none": "Repeat: Off",
+        "repeat_playlist": "Repeat: Playlist",
+        "repeat_track": "Repeat: Track",
     },
     "ru": {
         "queue_title": "Очередь воспроизведения",
@@ -61,6 +66,11 @@ MESSAGES = {
         "mute_unmute": "Отключить / Включить звук",
         "spotify_volume": "Громкость Spotify",
         "focus_spotify": "Нажмите, чтобы открыть Spotify",
+        "shuffle_enabled": "Перемешивание: Вкл",
+        "shuffle_disabled": "Перемешивание: Выкл",
+        "repeat_none": "Повтор: Выкл",
+        "repeat_playlist": "Повтор: Плейлист",
+        "repeat_track": "Повтор: Трек",
     },
     "de": {
         "queue_title": "Warteschlange",
@@ -88,6 +98,11 @@ MESSAGES = {
         "mute_unmute": "Stummschalten / Ton an",
         "spotify_volume": "Spotify Lautstärke",
         "focus_spotify": "Klicken, um Spotify zu fokussieren",
+        "shuffle_enabled": "Zufallswiedergabe: Ein",
+        "shuffle_disabled": "Zufallswiedergabe: Aus",
+        "repeat_none": "Wiederholen: Aus",
+        "repeat_playlist": "Wiederholen: Playlist",
+        "repeat_track": "Wiederholen: Titel",
     },
     "es": {
         "queue_title": "Cola de reproducción",
@@ -115,6 +130,11 @@ MESSAGES = {
         "mute_unmute": "Silenciar / Activar sonido",
         "spotify_volume": "Volumen de Spotify",
         "focus_spotify": "Haz clic para abrir Spotify",
+        "shuffle_enabled": "Aleatorio: Activado",
+        "shuffle_disabled": "Aleatorio: Desactivado",
+        "repeat_none": "Repetir: Desactivado",
+        "repeat_playlist": "Repetir: Lista",
+        "repeat_track": "Repetir: Canción",
     },
     "fr": {
         "queue_title": "File d'attente",
@@ -142,6 +162,11 @@ MESSAGES = {
         "mute_unmute": "Couper / Activer le son",
         "spotify_volume": "Volume Spotify",
         "focus_spotify": "Cliquer pour afficher Spotify",
+        "shuffle_enabled": "Aléatoire: Activé",
+        "shuffle_disabled": "Aléatoire: Désactivé",
+        "repeat_none": "Répéter: Désactivé",
+        "repeat_playlist": "Répéter: Playlist",
+        "repeat_track": "Répéter: Titre",
     }
 }
 

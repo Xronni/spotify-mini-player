@@ -48,6 +48,9 @@ class QueueManager:
         self.track_meta_cache = {}  # {track_id: {title, artist, uri}}
         self._fetching = False
         self._last_ldb_mtime = 0
+        self._last_browser_ldb_mtime = 0
+        self._last_sort_state = None
+        self._cached_sort_states = {}
         self._lock = threading.Lock()
         self.load_cache()
 
@@ -64,6 +67,15 @@ class QueueManager:
                     self.session_history = data.get("session_history", [])
                     self.context_cache = data.get("context_cache", {})
                     self.track_meta_cache = data.get("track_meta_cache", {})
+                    self._last_sort_state = data.get("sort_state", None)
+                    if self.context_uri and self.context_uri.startswith("spotify:playlist:"):
+                        pid = self.context_uri.split(":")[-1]
+                        active_sort = self._get_playlist_sort_state(pid)
+                        if active_sort != self._last_sort_state:
+                            self._last_sort_state = active_sort
+                            fresh_tracks = self._extract_playlist_from_ldb(pid)
+                            if fresh_tracks:
+                                self.all_context_tracks = fresh_tracks
             except Exception as e:
                 print(f"Error loading queue cache: {e}")
 
@@ -77,7 +89,8 @@ class QueueManager:
                 "all_context_tracks": self.all_context_tracks,
                 "session_history": self.session_history,
                 "context_cache": self.context_cache,
-                "track_meta_cache": self.track_meta_cache
+                "track_meta_cache": self.track_meta_cache,
+                "sort_state": self._last_sort_state
             }
             with open(cache_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -214,17 +227,30 @@ class QueueManager:
         return ""
 
     def check_for_updates(self):
-        """Checks if active playlist slice was modified in Spotify LevelDB and refreshes if needed."""
+        """Checks if active playlist or sort order was modified in Spotify LevelDB and refreshes if needed."""
         if not self.context_uri or not self.context_uri.startswith("spotify:playlist:"):
             return
         pid = self.context_uri.split(":")[-1]
         log_files = glob.glob(os.path.expanduser("~/.cache/spotify/Users/*-user/primary.ldb/*.log"))
-        if not log_files:
-            return
+        browser_files = glob.glob(os.path.expanduser("~/.cache/spotify/Browser/Local Storage/leveldb/*.log"))
+
+        needs_refresh = False
         try:
-            latest_mtime = max(os.path.getmtime(f) for f in log_files)
-            if latest_mtime > self._last_ldb_mtime:
-                self._last_ldb_mtime = latest_mtime
+            if log_files:
+                latest_ldb_mtime = max(os.path.getmtime(f) for f in log_files)
+                if latest_ldb_mtime > self._last_ldb_mtime:
+                    self._last_ldb_mtime = latest_ldb_mtime
+                    needs_refresh = True
+
+            if browser_files:
+                latest_browser_mtime = max(os.path.getmtime(f) for f in browser_files)
+                if latest_browser_mtime > self._last_browser_ldb_mtime:
+                    cur_sort = self._get_playlist_sort_state(pid)
+                    if cur_sort != self._last_sort_state:
+                        self._last_sort_state = cur_sort
+                        needs_refresh = True
+
+            if needs_refresh:
                 fresh_tracks = self._extract_playlist_from_ldb(pid)
                 if fresh_tracks and [t["tid"] for t in fresh_tracks] != [t.get("tid") for t in self.all_context_tracks]:
                     for t in fresh_tracks:
@@ -235,6 +261,11 @@ class QueueManager:
                             t["artist"] = cached.get("artist", t.get("artist"))
                     with self._lock:
                         self.all_context_tracks = fresh_tracks
+                        if self.current_track:
+                            new_idx = self._find_track_idx(self.current_track.get("uri", ""), self.current_track.get("title", ""))
+                            if new_idx >= 0:
+                                self.current_track["track_num"] = new_idx + 1
+                                self.last_valid_idx = new_idx
                     self.notify()
         except Exception as e:
             print(f"Error checking for playlist updates: {e}")
@@ -294,6 +325,17 @@ class QueueManager:
                 self.session_history.append(dict(old_track))
                 if len(self.session_history) > 40:
                     self.session_history.pop(0)
+
+        # Check if sort order of active playlist changed
+        if self.context_uri and self.context_uri.startswith("spotify:playlist:"):
+            cur_pid = self.context_uri.split(":")[-1]
+            active_sort = self._get_playlist_sort_state(cur_pid)
+            if active_sort != self._last_sort_state:
+                self._last_sort_state = active_sort
+                fresh_tracks = self._extract_playlist_from_ldb(cur_pid)
+                if fresh_tracks:
+                    with self._lock:
+                        self.all_context_tracks = fresh_tracks
 
         # 1. Check if current track is already within our active context tracks
         found_idx = self._find_track_idx(uri, title)
@@ -408,6 +450,66 @@ class QueueManager:
             return ""
         return uri.split(":")[-1].split("/")[-1].split("?")[0]
 
+    def _get_playlist_sort_state(self, playlist_id):
+        """Reads user's active sorting preference for playlist_id from Spotify's Browser Local Storage."""
+        browser_dir = os.path.expanduser("~/.cache/spotify/Browser/Local Storage/leveldb")
+        if not os.path.exists(browser_dir):
+            return None
+
+        files = glob.glob(os.path.join(browser_dir, "*.log")) + glob.glob(os.path.join(browser_dir, "*.ldb"))
+        if not files:
+            return None
+
+        try:
+            mtime = max(os.path.getmtime(f) for f in files)
+            if mtime == self._last_browser_ldb_mtime and playlist_id in self._cached_sort_states:
+                return self._cached_sort_states.get(playlist_id)
+
+            self._last_browser_ldb_mtime = mtime
+            target_key = f"spotify:playlist:{playlist_id}".encode("utf-8")
+
+            for fpath in sorted(files, key=os.path.getmtime, reverse=True):
+                with open(fpath, "rb") as fp:
+                    d = fp.read()
+                if target_key not in d:
+                    continue
+
+                idx = 0
+                latest_match = None
+                while True:
+                    pos = d.find(b"sortedState", idx)
+                    if pos == -1:
+                        break
+                    idx = pos + 11
+                    if target_key in d[pos:pos + 1000]:
+                        brace_start = d.find(b"{", pos, pos + 200)
+                        if brace_start != -1:
+                            depth = 0
+                            end = -1
+                            for i in range(brace_start, min(brace_start + 4096, len(d))):
+                                if d[i] == ord("{"):
+                                    depth += 1
+                                elif d[i] == ord("}"):
+                                    depth -= 1
+                                    if depth == 0:
+                                        end = i + 1
+                                        break
+                            if end != -1:
+                                try:
+                                    parsed = json.loads(d[brace_start:end].decode("utf-8", errors="ignore"))
+                                    target_str = f"spotify:playlist:{playlist_id}"
+                                    if target_str in parsed:
+                                        latest_match = parsed[target_str]
+                                except Exception:
+                                    pass
+                if latest_match is not None:
+                    self._cached_sort_states[playlist_id] = latest_match
+                    return latest_match
+        except Exception as e:
+            print(f"Error reading playlist sort state: {e}")
+
+        return self._cached_sort_states.get(playlist_id)
+
     def _extract_playlist_from_ldb(self, playlist_id):
         """Extracts all tracks directly from Spotify's LevelDB slice in real authentic sequence."""
         files = glob.glob(os.path.expanduser("~/.cache/spotify/Users/*-user/primary.ldb/*"))
@@ -441,10 +543,8 @@ class QueueManager:
                 seen.add(tid)
                 entries.append({"tid": tid, "uri": "spotify:track:" + tid, "added_at": added_at})
 
-        # Set 1-based playlist index
-        for idx, e in enumerate(entries):
-            e["track_num"] = idx + 1
-            # Check if metadata is cached
+        # Populate cached title / artist first
+        for e in entries:
             if e["tid"] in self.track_meta_cache:
                 cached = self.track_meta_cache[e["tid"]]
                 e["title"] = cached.get("title", "Трек")
@@ -452,6 +552,23 @@ class QueueManager:
             else:
                 e["title"] = "Трек"
                 e["artist"] = "Spotify"
+
+        # Apply active Spotify sort configuration
+        sort_state = self._get_playlist_sort_state(playlist_id)
+        if sort_state and isinstance(sort_state, dict):
+            field = sort_state.get("field", "").upper()
+            order = sort_state.get("order", "ASC").upper()
+            reverse = (order == "DESC")
+            if field == "ADDED_AT":
+                entries.sort(key=lambda x: x.get("added_at", 0), reverse=reverse)
+            elif field == "TITLE":
+                entries.sort(key=lambda x: (x.get("title") or "").lower(), reverse=reverse)
+            elif field == "ARTIST":
+                entries.sort(key=lambda x: (x.get("artist") or "").lower(), reverse=reverse)
+
+        # Set 1-based playlist index
+        for idx, e in enumerate(entries):
+            e["track_num"] = idx + 1
 
         return entries
 

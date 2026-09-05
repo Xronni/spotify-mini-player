@@ -11,12 +11,13 @@ PROPS_INTERFACE = "org.freedesktop.DBus.Properties"
 CACHE_DIR = os.path.expanduser("~/.cache/spotify-mini-player/covers")
 
 class MPRISManager:
-    def __init__(self, on_update_cb=None, on_status_cb=None, on_avail_cb=None, on_media_key_cb=None, on_volume_cb=None):
+    def __init__(self, on_update_cb=None, on_status_cb=None, on_avail_cb=None, on_media_key_cb=None, on_volume_cb=None, on_options_cb=None):
         self.on_update_cb = on_update_cb
         self.on_status_cb = on_status_cb
         self.on_avail_cb = on_avail_cb
         self.on_media_key_cb = on_media_key_cb
         self.on_volume_cb = on_volume_cb
+        self.on_options_cb = on_options_cb
 
         self.bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
         self.player_proxy = None
@@ -32,6 +33,8 @@ class MPRISManager:
         self.playback_status = "Stopped"
         self.length_us = 0
         self.track_id = ""
+        self.shuffle = False
+        self.loop_status = "None"
 
         os.makedirs(CACHE_DIR, exist_ok=True)
 
@@ -156,6 +159,7 @@ class MPRISManager:
         interface_name, changed, invalidated = params.unpack()
         if interface_name == PLAYER_INTERFACE:
             track_changed = False
+            options_changed = False
             if "Metadata" in changed:
                 track_changed = self._parse_metadata(changed["Metadata"])
             if "PlaybackStatus" in changed:
@@ -166,6 +170,14 @@ class MPRISManager:
                 vol = changed["Volume"]
                 if self.on_volume_cb:
                     self.on_volume_cb(vol)
+            if "Shuffle" in changed:
+                self.shuffle = bool(changed["Shuffle"])
+                options_changed = True
+            if "LoopStatus" in changed:
+                self.loop_status = str(changed["LoopStatus"])
+                options_changed = True
+            if options_changed and self.on_options_cb:
+                self.on_options_cb(self.shuffle, self.loop_status)
             if self.on_update_cb:
                 self.on_update_cb(track_changed=track_changed, is_user_action=True)
 
@@ -180,6 +192,27 @@ class MPRISManager:
             meta_prop = self.player_proxy.get_cached_property("Metadata")
             if meta_prop:
                 self._parse_metadata(meta_prop.unpack())
+
+            shuf_prop = self.player_proxy.get_cached_property("Shuffle")
+            if shuf_prop:
+                self.shuffle = bool(shuf_prop.unpack())
+            elif self.props_proxy:
+                try:
+                    self.shuffle = bool(self.props_proxy.call_sync("Get", GLib.Variant("(ss)", (PLAYER_INTERFACE, "Shuffle")), Gio.DBusCallFlags.NONE, -1, None).unpack()[0])
+                except Exception:
+                    pass
+
+            loop_prop = self.player_proxy.get_cached_property("LoopStatus")
+            if loop_prop:
+                self.loop_status = str(loop_prop.unpack())
+            elif self.props_proxy:
+                try:
+                    self.loop_status = str(self.props_proxy.call_sync("Get", GLib.Variant("(ss)", (PLAYER_INTERFACE, "LoopStatus")), Gio.DBusCallFlags.NONE, -1, None).unpack()[0])
+                except Exception:
+                    pass
+
+            if self.on_options_cb:
+                self.on_options_cb(self.shuffle, self.loop_status)
 
             if self.on_update_cb:
                 self.on_update_cb(track_changed=False, is_user_action=False)
@@ -334,3 +367,29 @@ class MPRISManager:
                 self.root_proxy.call_sync("Raise", None, Gio.DBusCallFlags.NONE, -1, None)
             except Exception as e:
                 print(f"Raise failed: {e}")
+
+    def toggle_shuffle(self):
+        if self.props_proxy:
+            try:
+                new_val = not self.shuffle
+                params = GLib.Variant("(ssv)", (PLAYER_INTERFACE, "Shuffle", GLib.Variant("b", new_val)))
+                self.props_proxy.call_sync("Set", params, Gio.DBusCallFlags.NONE, -1, None)
+                self.shuffle = new_val
+                if self.on_options_cb:
+                    self.on_options_cb(self.shuffle, self.loop_status)
+            except Exception as e:
+                print(f"toggle_shuffle failed: {e}")
+
+    def cycle_loop_status(self):
+        if self.props_proxy:
+            try:
+                modes = ["None", "Playlist", "Track"]
+                curr = self.loop_status if self.loop_status in modes else "None"
+                next_mode = modes[(modes.index(curr) + 1) % len(modes)]
+                params = GLib.Variant("(ssv)", (PLAYER_INTERFACE, "LoopStatus", GLib.Variant("s", next_mode)))
+                self.props_proxy.call_sync("Set", params, Gio.DBusCallFlags.NONE, -1, None)
+                self.loop_status = next_mode
+                if self.on_options_cb:
+                    self.on_options_cb(self.shuffle, self.loop_status)
+            except Exception as e:
+                print(f"cycle_loop_status failed: {e}")
