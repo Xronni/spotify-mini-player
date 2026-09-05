@@ -510,7 +510,7 @@ class SpotifyMiniWindow(Gtk.Window):
         self.title_label.add_css_class("track-title")
         right_col.append(self.title_label)
 
-        self.artist_label = Gtk.Label(label="Spotify")
+        self.artist_label = Gtk.Label(label="")
         self.artist_label.set_xalign(0.0)
         self.artist_label.set_ellipsize(Pango.EllipsizeMode.END)
         self.artist_label.add_css_class("track-artist")
@@ -621,8 +621,20 @@ class SpotifyMiniWindow(Gtk.Window):
         self.queue_scroll.add_css_class("queue-scroll")
         self.queue_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.queue_scroll.set_min_content_height(190)
-        self.queue_scroll.set_max_content_height(190)
         self.queue_scroll.set_propagate_natural_height(False)
+
+        self.is_queue_hovered = False
+        self._user_scrolled_queue = False
+        self._ignore_scroll_event = False
+
+        q_motion = Gtk.EventControllerMotion()
+        q_motion.connect("enter", lambda c, x, y: setattr(self, "is_queue_hovered", True))
+        q_motion.connect("leave", lambda c: setattr(self, "is_queue_hovered", False))
+        self.queue_scroll.add_controller(q_motion)
+
+        vadj = self.queue_scroll.get_vadjustment()
+        if vadj:
+            vadj.connect("value-changed", self._on_queue_scrolled)
 
         self.queue_list_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         self.queue_scroll.set_child(self.queue_list_box)
@@ -755,6 +767,12 @@ class SpotifyMiniWindow(Gtk.Window):
         if not revealer.get_child_revealed() and not self.is_queue_open:
             self.set_default_size(400, 185)
 
+    def _on_queue_scrolled(self, adj):
+        if getattr(self, "_ignore_scroll_event", False):
+            return
+        if getattr(self, "is_queue_hovered", False):
+            self._user_scrolled_queue = True
+
     def _scroll_to_current_track(self):
         if not hasattr(self, "queue_scroll") or not self.queue_scroll:
             return False
@@ -764,7 +782,7 @@ class SpotifyMiniWindow(Gtk.Window):
 
         viewport_h = adj.get_page_size()
         if viewport_h <= 10.0:
-            viewport_h = 160.0
+            viewport_h = 190.0
 
         target_y = None
         if hasattr(self, "curr_row") and self.curr_row and hasattr(self, "queue_list_box") and self.queue_list_box:
@@ -790,12 +808,17 @@ class SpotifyMiniWindow(Gtk.Window):
         else:
             final_y = max(0.0, target_y)
 
-        adj.set_value(final_y)
+        self._ignore_scroll_event = True
+        try:
+            adj.set_value(final_y)
+        finally:
+            self._ignore_scroll_event = False
         return False
 
     def _toggle_queue(self, button=None):
         self.is_queue_open = not self.queue_revealer.get_reveal_child()
         if self.is_queue_open:
+            self._user_scrolled_queue = False
             self.queue_btn.add_css_class("queue-active")
             self._cancel_hide_timer()
             self._cancel_fade()
@@ -805,6 +828,7 @@ class SpotifyMiniWindow(Gtk.Window):
             GLib.idle_add(self._scroll_to_current_track)
             GLib.timeout_add(60, self._scroll_to_current_track)
             GLib.timeout_add(180, self._scroll_to_current_track)
+            GLib.timeout_add(320, self._scroll_to_current_track)
             if not self.is_pinned and not self.is_hovered:
                 self._schedule_hide(4500)
         else:
@@ -1030,6 +1054,9 @@ class SpotifyMiniWindow(Gtk.Window):
         if order_changed:
             self.show_queue_loading(duration_ms=450)
 
+        vadj = self.queue_scroll.get_vadjustment() if hasattr(self, "queue_scroll") and self.queue_scroll else None
+        saved_scroll_y = vadj.get_value() if vadj else 0.0
+
         # Clear existing children
         while True:
             child = self.queue_list_box.get_first_child()
@@ -1042,8 +1069,15 @@ class SpotifyMiniWindow(Gtk.Window):
         past_tracks = self.queue_mgr.get_past_tracks(limit=40, loop=is_loop)
         upcoming_tracks = self.queue_mgr.get_upcoming_tracks(limit=60, loop=is_loop)
         curr_track = self.queue_mgr.current_track or {}
+        curr_uri = curr_track.get("uri") or self.mpris.track_id or ""
+        last_uri = getattr(self, "_last_rebuilt_track_uri", None)
+        track_changed = bool(curr_uri and last_uri and curr_uri != last_uri)
+        self._last_rebuilt_track_uri = curr_uri
+
         curr_title = self.mpris.title or curr_track.get("title", t("no_track"))
-        curr_artist = self.mpris.artist or curr_track.get("artist", "Spotify")
+        curr_artist = (self.mpris.artist or curr_track.get("artist") or "").strip()
+        if curr_artist.casefold() == "spotify":
+            curr_artist = ""
 
         ctx_name = self.queue_mgr.get_context_name(current_album=self.mpris.album)
         if ctx_name and is_valid_name(ctx_name):
@@ -1087,11 +1121,15 @@ class SpotifyMiniWindow(Gtk.Window):
                 t_lbl.add_css_class("queue-history-title")
                 info_box.append(t_lbl)
 
-                a_lbl = Gtk.Label(label=track.get("artist", "Spotify"))
-                a_lbl.set_xalign(0.0)
-                a_lbl.set_ellipsize(Pango.EllipsizeMode.END)
-                a_lbl.add_css_class("queue-history-artist")
-                info_box.append(a_lbl)
+                artist_val = (track.get("artist") or "").strip()
+                if artist_val.casefold() == "spotify":
+                    artist_val = ""
+                if artist_val:
+                    a_lbl = Gtk.Label(label=artist_val)
+                    a_lbl.set_xalign(0.0)
+                    a_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+                    a_lbl.add_css_class("queue-history-artist")
+                    info_box.append(a_lbl)
 
                 row.append(info_box)
 
@@ -1133,11 +1171,12 @@ class SpotifyMiniWindow(Gtk.Window):
         t_lbl.add_css_class("queue-current-title")
         info_box.append(t_lbl)
 
-        a_lbl = Gtk.Label(label=curr_artist)
-        a_lbl.set_xalign(0.0)
-        a_lbl.set_ellipsize(Pango.EllipsizeMode.END)
-        a_lbl.add_css_class("queue-current-artist")
-        info_box.append(a_lbl)
+        if curr_artist:
+            a_lbl = Gtk.Label(label=curr_artist)
+            a_lbl.set_xalign(0.0)
+            a_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+            a_lbl.add_css_class("queue-current-artist")
+            info_box.append(a_lbl)
 
         self.curr_row.append(info_box)
 
@@ -1188,11 +1227,15 @@ class SpotifyMiniWindow(Gtk.Window):
                 t_lbl.add_css_class("queue-item-title")
                 info_box.append(t_lbl)
 
-                a_lbl = Gtk.Label(label=track.get("artist", "Spotify"))
-                a_lbl.set_xalign(0.0)
-                a_lbl.set_ellipsize(Pango.EllipsizeMode.END)
-                a_lbl.add_css_class("queue-item-artist")
-                info_box.append(a_lbl)
+                artist_val = (track.get("artist") or "").strip()
+                if artist_val.casefold() == "spotify":
+                    artist_val = ""
+                if artist_val:
+                    a_lbl = Gtk.Label(label=artist_val)
+                    a_lbl.set_xalign(0.0)
+                    a_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+                    a_lbl.add_css_class("queue-item-artist")
+                    info_box.append(a_lbl)
 
                 row.append(info_box)
 
@@ -1208,10 +1251,28 @@ class SpotifyMiniWindow(Gtk.Window):
 
                 self.queue_list_box.append(row)
 
-        # Center scroll on current track
-        GLib.idle_add(self._scroll_to_current_track)
-        GLib.timeout_add(50, self._scroll_to_current_track)
-        GLib.timeout_add(150, self._scroll_to_current_track)
+        # Center scroll on current track if appropriate, otherwise preserve user's scroll position
+        should_center = (
+            order_changed or 
+            track_changed or 
+            not getattr(self, "_user_scrolled_queue", False)
+        )
+
+        if should_center and not getattr(self, "is_queue_hovered", False):
+            self._user_scrolled_queue = False
+            GLib.idle_add(self._scroll_to_current_track)
+            GLib.timeout_add(50, self._scroll_to_current_track)
+            GLib.timeout_add(150, self._scroll_to_current_track)
+        else:
+            if vadj and saved_scroll_y > 0:
+                def _restore_scroll():
+                    self._ignore_scroll_event = True
+                    if vadj:
+                        vadj.set_value(saved_scroll_y)
+                    self._ignore_scroll_event = False
+                    return False
+                GLib.idle_add(_restore_scroll)
+                GLib.timeout_add(50, _restore_scroll)
 
     def _on_poll_window_state(self):
         if getattr(self, "_switching_track", False):
@@ -1242,6 +1303,12 @@ class SpotifyMiniWindow(Gtk.Window):
                         set_window_always_above(xid, True)
                         if self.saved_x is not None and self.saved_y is not None:
                             move_window_to(xid, self.saved_x, self.saved_y)
+                    self._user_scrolled_queue = False
+                    if self.is_queue_open:
+                        GLib.idle_add(self._scroll_to_current_track)
+                        GLib.timeout_add(60, self._scroll_to_current_track)
+                        GLib.timeout_add(180, self._scroll_to_current_track)
+                        GLib.timeout_add(320, self._scroll_to_current_track)
 
         # Track window position for saving when visible
         if self.get_visible():
@@ -1283,11 +1350,25 @@ class SpotifyMiniWindow(Gtk.Window):
         self._update_playback_options_ui()
 
     def _on_repeat_clicked(self, button=None):
+        old_loop = getattr(self.mpris, "loop_status", "None")
         self.mpris.cycle_loop_status()
+        new_loop = getattr(self.mpris, "loop_status", "None")
+        self._last_loop_status = new_loop
         self._update_playback_options_ui()
+        if "Playlist" in (old_loop, new_loop) and old_loop != new_loop:
+            self._rebuild_queue_ui(order_changed=True)
+            self._scroll_to_current_track()
 
     def _on_mpris_options_changed(self, shuffle, loop_status):
+        old_loop = getattr(self, "_last_loop_status", None)
+        self._last_loop_status = loop_status
         GLib.idle_add(self._update_playback_options_ui)
+        if old_loop is not None and "Playlist" in (old_loop, loop_status) and old_loop != loop_status:
+            def _refresh():
+                self._rebuild_queue_ui(order_changed=True)
+                self._scroll_to_current_track()
+                return False
+            GLib.idle_add(_refresh)
 
     def _update_playback_options_ui(self):
         if not hasattr(self, "shuffle_btn") or not hasattr(self, "repeat_btn"):
@@ -1465,6 +1546,13 @@ class SpotifyMiniWindow(Gtk.Window):
             if not self.is_hovered and not self.is_scrubbing:
                 self._schedule_hide(duration_ms)
 
+        if self.is_queue_open:
+            self._user_scrolled_queue = False
+            GLib.idle_add(self._scroll_to_current_track)
+            GLib.timeout_add(60, self._scroll_to_current_track)
+            GLib.timeout_add(180, self._scroll_to_current_track)
+            GLib.timeout_add(320, self._scroll_to_current_track)
+
     def _schedule_hide(self, duration_ms):
         self._cancel_hide_timer()
         self.hide_timer_id = GLib.timeout_add(duration_ms, self._on_autohide_timer)
@@ -1559,7 +1647,20 @@ class SpotifyMiniWindow(Gtk.Window):
             self.show_osd(4500)
         return False
 
-    def _on_metadata_updated(self, track_changed=False, is_user_action=False):
+    def _on_mpris_status(self, status):
+        GLib.idle_add(lambda: self._apply_status(status))
+
+    def _apply_status(self, status):
+        self.play_btn.set_icon_name("media-playback-pause-symbolic" if status == "Playing" else "media-playback-start-symbolic")
+        if status == "Playing":
+            self.play_btn.set_tooltip_text(t("pause"))
+            self.visualizer.start()
+        else:
+            self.play_btn.set_tooltip_text(t("play"))
+            self.visualizer.stop()
+        return False
+
+    def _on_mpris_metadata(self, track_changed=False, is_user_action=False):
         GLib.idle_add(lambda: self._apply_metadata(track_changed=track_changed, is_user_action=is_user_action))
 
     def _apply_metadata(self, track_changed=False, is_user_action=False):
@@ -1571,9 +1672,14 @@ class SpotifyMiniWindow(Gtk.Window):
         self.title_label.set_text(self.mpris.title)
         self.title_label.set_tooltip_text(self.mpris.title)
 
-        artist_text = self.mpris.artist
+        artist_text = (self.mpris.artist or "").strip()
+        if artist_text.casefold() == "spotify":
+            artist_text = ""
         if self.mpris.album:
-            artist_text += f" • {self.mpris.album}"
+            if artist_text:
+                artist_text += f" • {self.mpris.album}"
+            else:
+                artist_text = self.mpris.album
         self.artist_label.set_text(artist_text)
         self.artist_label.set_tooltip_text(artist_text)
 
@@ -1583,6 +1689,7 @@ class SpotifyMiniWindow(Gtk.Window):
         self.dur_label.set_text(format_time(self.duration_sec))
 
         if track_changed or self.mpris.track_id != self.last_track_id:
+            self._user_scrolled_queue = False
             prev_duration = getattr(self, "curr_track_duration", 0.0)
             prev_pos = getattr(self, "last_sync_pos", 0.0)
             self.curr_track_duration = new_duration

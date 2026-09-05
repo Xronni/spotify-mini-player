@@ -72,6 +72,13 @@ class QueueManager:
                     self.session_history = data.get("session_history", [])
                     self.context_cache = data.get("context_cache", {})
                     self.track_meta_cache = data.get("track_meta_cache", {})
+                    # Clean any legacy bogus "Spotify" artist entries
+                    for k, v in self.track_meta_cache.items():
+                        if (v.get("artist") or "").strip().casefold() == "spotify":
+                            v["artist"] = ""
+                    for t in self.all_context_tracks:
+                        if (t.get("artist") or "").strip().casefold() == "spotify":
+                            t["artist"] = ""
                     self._last_sort_state = data.get("sort_state", None)
                     if self.context_uri and self.context_uri.startswith("spotify:playlist:"):
                         pid = self.context_uri.split(":")[-1]
@@ -686,12 +693,13 @@ class QueueManager:
             cached = self._lookup_track_meta(e["tid"])
             if cached:
                 e["title"] = cached.get("title") or e.get("title") or "Трек"
-                e["artist"] = cached.get("artist") or e.get("artist") or "Spotify"
+                artist_val = (cached.get("artist") or e.get("artist") or "").strip()
+                e["artist"] = "" if artist_val.casefold() == "spotify" else artist_val
                 e["album"] = cached.get("album") or e.get("album") or ""
                 e["duration"] = cached.get("duration") or e.get("duration") or 0
             else:
                 e["title"] = e.get("title", "Трек")
-                e["artist"] = e.get("artist", "Spotify")
+                e["artist"] = ""
                 e["album"] = e.get("album", "")
                 e["duration"] = e.get("duration", 0)
 
@@ -738,9 +746,17 @@ class QueueManager:
         if not track_id:
             return None
         cached = self._lookup_track_meta(track_id)
-        if cached and cached.get("album") and cached.get("title") and cached.get("title") not in ("Трек", "", None):
+        if cached:
+            has_title = bool(cached.get("title") and cached.get("title") not in ("Трек", "", None))
+            has_artist = bool(cached.get("artist") and cached.get("artist").strip().casefold() != "spotify")
+            has_album = bool(cached.get("album"))
+            if has_title and has_artist and has_album:
+                return cached
+
+        if getattr(self, "_rate_limited_until", 0) > time.time():
             return cached
 
+        # 1. Try embed API
         try:
             url = f"https://open.spotify.com/embed/track/{track_id}"
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
@@ -751,7 +767,8 @@ class QueueManager:
                     d = json.loads(m.group(1))
                     entity = d.get("props", {}).get("pageProps", {}).get("state", {}).get("data", {}).get("entity", {})
                     t_name = entity.get("name")
-                    a_name = ", ".join([a["name"] for a in entity.get("artists", [])]) if entity.get("artists") else "Spotify"
+                    artists_list = [a["name"] for a in entity.get("artists", []) if a.get("name") and a["name"] != "Spotify"]
+                    a_name = ", ".join(artists_list) if artists_list else ""
                     album_obj = entity.get("album") or {}
                     alb_name = album_obj.get("name", "") if isinstance(album_obj, dict) else ""
                     dur = entity.get("duration", 0)
@@ -759,17 +776,20 @@ class QueueManager:
                         info = {"title": t_name, "artist": a_name, "uri": f"spotify:track:{track_id}", "album": alb_name, "duration": dur}
                         self.track_meta_cache[track_id] = info
                         return info
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                self._rate_limited_until = time.time() + 90
         except Exception:
             pass
 
-        # If album was not in embed, try open.spotify.com/track/{track_id}
+        # 2. If album or artist was not in embed, try open.spotify.com/track/{track_id}
         try:
             url = f"https://open.spotify.com/track/{track_id}"
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
             with urllib.request.urlopen(req, timeout=3.5) as resp:
                 html = resp.read().decode("utf-8", errors="ignore")
             title = ""
-            artist = "Spotify"
+            artist = ""
             album = ""
             m_t = re.search(r"<meta property=\"og:title\" content=\"([^\"]+)\"", html)
             if m_t:
@@ -779,34 +799,47 @@ class QueueManager:
                 parts = m_d.group(1).split(" · ")
                 if len(parts) >= 3:
                     artist = parts[0].strip()
+                    if artist.casefold() == "spotify":
+                        artist = ""
                     album = parts[1].strip()
             if title:
                 info = {"title": title, "artist": artist, "uri": f"spotify:track:{track_id}", "album": album, "duration": 0}
                 self.track_meta_cache[track_id] = info
                 return info
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                self._rate_limited_until = time.time() + 90
         except Exception:
             pass
 
-        # Fallback to oembed (never rate limited)
+        # 3. Fallback to oembed (never hardcode Spotify as artist)
         try:
             o_url = f"https://open.spotify.com/oembed?url=https://open.spotify.com/track/{track_id}"
             req = urllib.request.Request(o_url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=3) as resp:
                 d = json.loads(resp.read().decode())
                 t_name = d.get("title")
+                a_name = (d.get("author_name") or "").strip()
+                if a_name.casefold() == "spotify":
+                    a_name = ""
                 if t_name:
-                    info = {"title": t_name, "artist": "Spotify", "uri": f"spotify:track:{track_id}", "album": "", "duration": 0}
+                    info = {"title": t_name, "artist": a_name, "uri": f"spotify:track:{track_id}", "album": "", "duration": 0}
                     self.track_meta_cache[track_id] = info
                     return info
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                self._rate_limited_until = time.time() + 90
         except Exception:
             pass
-        return None
+
+        return cached
 
     def _resolve_missing_tracks_async(self, curr_idx=None):
         if not self.all_context_tracks:
             return
 
         def resolver():
+            time.sleep(1.0)
             with self._lock:
                 tracks = self.all_context_tracks
                 n_tracks = len(tracks)
@@ -827,6 +860,12 @@ class QueueManager:
                 if c_idx is None:
                     c_idx = 0
 
+            def is_incomplete(t):
+                no_title = t.get("title") in ("Трек", "", None)
+                no_artist = not t.get("artist") or t.get("artist").strip().casefold() == "spotify"
+                no_album = not t.get("album")
+                return no_title or no_artist or no_album
+
             # 1. High-priority window: visible in queue (15 before, 45 after)
             start_i = max(0, c_idx - 15)
             end_i = min(n_tracks, c_idx + 45)
@@ -837,26 +876,22 @@ class QueueManager:
                 tid = self._extract_id(t.get("uri", ""))
                 cached = self._lookup_track_meta(tid)
                 if cached:
-                    if t.get("title") in ("Трек", "", None):
-                        t["title"] = cached.get("title", t.get("title"))
-                    if not t.get("artist") or t.get("artist") == "Spotify":
-                        t["artist"] = cached.get("artist", t.get("artist"))
+                    if t.get("title") in ("Трек", "", None) and cached.get("title"):
+                        t["title"] = cached.get("title")
+                    c_art = (cached.get("artist") or "").strip()
+                    if (not t.get("artist") or t.get("artist") == "Spotify") and c_art and c_art != "Spotify":
+                        t["artist"] = c_art
                     if not t.get("album") and cached.get("album"):
                         t["album"] = cached.get("album")
-                if tid and (t.get("title") in ("Трек", "", None) or not t.get("album")):
+                if tid and is_incomplete(t):
                     missing_priority.append((i, tid))
 
             if missing_priority:
-                def _fetch_one(pair):
-                    i, tid = pair
-                    meta = self._fetch_track_info(tid)
-                    return i, meta
-
-                with ThreadPoolExecutor(max_workers=6) as executor:
-                    results = list(executor.map(_fetch_one, missing_priority))
-
                 updated = False
-                for i, meta in results:
+                for i, tid in missing_priority:
+                    if getattr(self, "_rate_limited_until", 0) > time.time():
+                        break
+                    meta = self._fetch_track_info(tid)
                     if meta and i < len(tracks):
                         if meta.get("title"):
                             tracks[i]["title"] = meta["title"]
@@ -865,12 +900,13 @@ class QueueManager:
                         if meta.get("album"):
                             tracks[i]["album"] = meta["album"]
                         updated = True
+                    time.sleep(0.35)
 
                 if updated:
                     self.save_cache()
-                    GLib.idle_add(self.notify)
+                    GLib.idle_add(lambda: self.notify(order_changed=False))
 
-            # 2. Background pass for the rest of the playlist
+            # 2. Gentle background pass for the rest of the playlist
             remaining_missing = []
             for i in range(n_tracks):
                 if i < start_i or i >= end_i:
@@ -878,33 +914,34 @@ class QueueManager:
                     tid = self._extract_id(t.get("uri", ""))
                     cached = self._lookup_track_meta(tid)
                     if cached:
-                        if t.get("title") in ("Трек", "", None):
-                            t["title"] = cached.get("title", t.get("title"))
-                        if not t.get("artist") or t.get("artist") == "Spotify":
-                            t["artist"] = cached.get("artist", t.get("artist"))
+                        if t.get("title") in ("Трек", "", None) and cached.get("title"):
+                            t["title"] = cached.get("title")
+                        c_art = (cached.get("artist") or "").strip()
+                        if (not t.get("artist") or t.get("artist") == "Spotify") and c_art and c_art != "Spotify":
+                            t["artist"] = c_art
                         if not t.get("album") and cached.get("album"):
                             t["album"] = cached.get("album")
-                    if tid and (t.get("title") in ("Трек", "", None) or not t.get("album")):
+                    if tid and is_incomplete(t):
                         remaining_missing.append((i, tid))
 
             if remaining_missing:
-                for batch_start in range(0, len(remaining_missing), 10):
-                    batch = remaining_missing[batch_start:batch_start + 10]
-                    with ThreadPoolExecutor(max_workers=4) as executor:
-                        batch_res = list(executor.map(lambda p: (p[0], self._fetch_track_info(p[1])), batch))
-                    batch_updated = False
-                    for i, meta in batch_res:
-                        if meta and i < len(tracks):
-                            if meta.get("title"):
-                                tracks[i]["title"] = meta["title"]
-                            if meta.get("artist") and meta["artist"] != "Spotify":
-                                tracks[i]["artist"] = meta["artist"]
-                            if meta.get("album"):
-                                tracks[i]["album"] = meta["album"]
-                            batch_updated = True
-                    if batch_updated:
-                        self.save_cache()
-                    time.sleep(0.3)
+                batch_updated = False
+                for i, tid in remaining_missing:
+                    if getattr(self, "_rate_limited_until", 0) > time.time():
+                        break
+                    meta = self._fetch_track_info(tid)
+                    if meta and i < len(tracks):
+                        if meta.get("title"):
+                            tracks[i]["title"] = meta["title"]
+                        if meta.get("artist") and meta["artist"] != "Spotify":
+                            tracks[i]["artist"] = meta["artist"]
+                        if meta.get("album"):
+                            tracks[i]["album"] = meta["album"]
+                        batch_updated = True
+                    time.sleep(0.7)
+                if batch_updated:
+                    self.save_cache()
+                    GLib.idle_add(lambda: self.notify(order_changed=False))
 
         t = threading.Thread(target=resolver, daemon=True)
         t.start()
@@ -1086,8 +1123,9 @@ class QueueManager:
                     res = []
                     for idx, t in enumerate(track_list):
                         tid = self._extract_id(t.get("uri", ""))
-                        title_str = t.get("title", "")
-                        artist_str = t.get("subtitle", "Spotify")
+                        artist_str = (t.get("subtitle") or "").strip()
+                        if artist_str.casefold() == "spotify":
+                            artist_str = ""
                         if tid and title_str:
                             self.track_meta_cache[tid] = {
                                 "title": title_str,

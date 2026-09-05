@@ -26,7 +26,7 @@ class MPRISManager:
         self.is_available = False
 
         self.title = "No Track Playing"
-        self.artist = "Spotify"
+        self.artist = ""
         self.album = ""
         self.art_url = ""
         self.local_art_path = None
