@@ -54,6 +54,11 @@ class QueueManager:
         self._lock = threading.Lock()
         self.load_cache()
 
+    def _lookup_track_meta(self, tid):
+        if not tid:
+            return None
+        return self.track_meta_cache.get(tid)
+
     def load_cache(self):
         cache_file = os.path.join(CACHE_DIR, "queue_cache.json")
         if os.path.exists(cache_file):
@@ -97,10 +102,13 @@ class QueueManager:
         except Exception as e:
             print(f"Error saving queue cache: {e}")
 
-    def notify(self):
+    def notify(self, order_changed=False):
         self.save_cache()
         if self.on_queue_changed_cb:
-            self.on_queue_changed_cb()
+            try:
+                self.on_queue_changed_cb(order_changed=order_changed)
+            except TypeError:
+                self.on_queue_changed_cb()
 
     def _find_track_idx(self, uri, title=""):
         if not self.all_context_tracks:
@@ -256,6 +264,7 @@ class QueueManager:
                         glob.glob(os.path.expanduser("~/.cache/spotify/Browser/Local Storage/leveldb/*.ldb"))
 
         needs_refresh = False
+        sort_changed = False
         try:
             if log_files:
                 latest_ldb_mtime = max(os.path.getmtime(f) for f in log_files)
@@ -268,14 +277,15 @@ class QueueManager:
                 print(f"[QueueManager] Sort state changed for {pid}: {self._last_sort_state} -> {cur_sort}")
                 self._last_sort_state = cur_sort
                 needs_refresh = True
+                sort_changed = True
 
             if needs_refresh:
                 fresh_tracks = self._extract_playlist_from_ldb(pid)
                 if fresh_tracks:
                     for t in fresh_tracks:
                         tid = t.get("tid")
-                        if tid in self.track_meta_cache:
-                            cached = self.track_meta_cache[tid]
+                        cached = self._lookup_track_meta(tid)
+                        if cached:
                             t["title"] = cached.get("title", t.get("title"))
                             t["artist"] = cached.get("artist", t.get("artist"))
                             t["album"] = cached.get("album", t.get("album", ""))
@@ -287,7 +297,7 @@ class QueueManager:
                             if new_idx >= 0:
                                 self.current_track["track_num"] = new_idx + 1
                                 self.last_valid_idx = new_idx
-                    self.notify()
+                    self.notify(order_changed=sort_changed)
         except Exception as e:
             print(f"Error checking for playlist updates: {e}")
 
@@ -332,7 +342,12 @@ class QueueManager:
 
         curr_id = self._extract_id(uri)
         if curr_id:
-            self.track_meta_cache[curr_id] = {"title": title, "artist": artist, "uri": uri}
+            curr_meta = self.track_meta_cache.setdefault(curr_id, {})
+            curr_meta["title"] = title
+            curr_meta["artist"] = artist
+            curr_meta["uri"] = uri
+            if album:
+                curr_meta["album"] = album
 
         old_track = self.current_track
         norm_title = title.strip().lower()
@@ -345,17 +360,19 @@ class QueueManager:
                     self.session_history.pop(0)
 
         # Check if sort order of active playlist changed
+        order_changed = False
         if self.context_uri and self.context_uri.startswith("spotify:playlist:"):
             cur_pid = self.context_uri.split(":")[-1]
             active_sort = self._get_playlist_sort_state(cur_pid)
             if active_sort != self._last_sort_state:
                 self._last_sort_state = active_sort
+                order_changed = True
                 fresh_tracks = self._extract_playlist_from_ldb(cur_pid)
                 if fresh_tracks:
                     for t in fresh_tracks:
                         tid = t.get("tid")
-                        if tid in self.track_meta_cache:
-                            cached = self.track_meta_cache[tid]
+                        cached = self._lookup_track_meta(tid)
+                        if cached:
                             t["title"] = cached.get("title", t.get("title"))
                             t["artist"] = cached.get("artist", t.get("artist"))
                             t["album"] = cached.get("album", t.get("album", ""))
@@ -371,15 +388,18 @@ class QueueManager:
             if t.get("title") in ("Трек", "", None, "Track"):
                 t["title"] = title
                 t["artist"] = artist
+            if album and not t.get("album"):
+                t["album"] = album
             self.current_track = {
                 "title": title,
                 "artist": artist,
                 "uri": uri,
+                "album": album,
                 "track_num": found_idx + 1
             }
             if not is_valid_name(self.context_name):
                 self.get_context_name(current_album=album)
-            self.notify()
+            self.notify(order_changed=order_changed)
             self._resolve_missing_tracks_async(found_idx)
             return
 
@@ -442,7 +462,7 @@ class QueueManager:
                     "uri": uri,
                     "track_num": fresh_idx + 1 if fresh_idx >= 0 else 1
                 }
-            self.notify()
+            self.notify(order_changed=True)
 
             self._sync_context_async(curr_id, title, artist, album)
             if fresh_idx >= 0:
@@ -474,9 +494,10 @@ class QueueManager:
                             "title": title,
                             "artist": artist,
                             "uri": uri,
+                            "album": album,
                             "track_num": fresh_idx + 1 if fresh_idx >= 0 else 1
                         }
-                    self.notify()
+                    self.notify(order_changed=True)
                     self._sync_context_async(curr_id, title, artist, album)
                     if fresh_idx >= 0:
                         self._resolve_missing_tracks_async(fresh_idx)
@@ -499,9 +520,10 @@ class QueueManager:
                                 "title": title,
                                 "artist": artist,
                                 "uri": uri,
+                                "album": album,
                                 "track_num": fresh_idx + 1 if fresh_idx >= 0 else 1
                             }
-                        self.notify()
+                        self.notify(order_changed=True)
                         return
             elif detected_ctx.startswith("spotify:album:"):
                 name, emb_tracks = self._fetch_embed_tracks(detected_ctx)
@@ -520,9 +542,10 @@ class QueueManager:
                             "title": title,
                             "artist": artist,
                             "uri": uri,
+                            "album": album,
                             "track_num": fresh_idx + 1 if fresh_idx >= 0 else 1
                         }
-                    self.notify()
+                    self.notify(order_changed=True)
                     return
 
         # Case D: Try fetching album tracks for track
@@ -543,9 +566,10 @@ class QueueManager:
                         "title": title,
                         "artist": artist,
                         "uri": uri,
+                        "album": album,
                         "track_num": fresh_idx + 1 if fresh_idx >= 0 else 1
                     }
-                self.notify()
+                self.notify(order_changed=True)
                 return
 
         # Case E: Standalone single track fallback
@@ -659,17 +683,17 @@ class QueueManager:
 
         # Populate cached title / artist / album / duration
         for e in entries:
-            if e["tid"] in self.track_meta_cache:
-                cached = self.track_meta_cache[e["tid"]]
-                e["title"] = cached.get("title", "Трек")
-                e["artist"] = cached.get("artist", "Spotify")
-                e["album"] = cached.get("album", "")
-                e["duration"] = cached.get("duration", 0)
+            cached = self._lookup_track_meta(e["tid"])
+            if cached:
+                e["title"] = cached.get("title") or e.get("title") or "Трек"
+                e["artist"] = cached.get("artist") or e.get("artist") or "Spotify"
+                e["album"] = cached.get("album") or e.get("album") or ""
+                e["duration"] = cached.get("duration") or e.get("duration") or 0
             else:
-                e["title"] = "Трек"
-                e["artist"] = "Spotify"
-                e["album"] = ""
-                e["duration"] = 0
+                e["title"] = e.get("title", "Трек")
+                e["artist"] = e.get("artist", "Spotify")
+                e["album"] = e.get("album", "")
+                e["duration"] = e.get("duration", 0)
 
         # Apply active Spotify sort configuration for all columns
         sort_state = self._get_playlist_sort_state(playlist_id)
@@ -678,17 +702,31 @@ class QueueManager:
             order = str(sort_state.get("order", "ASC")).upper()
             reverse = (order == "DESC")
             if field == "ADDED_AT":
-                entries.sort(key=lambda x: x.get("added_at", 0), reverse=reverse)
+                entries.sort(key=lambda x: (x.get("added_at", 0), (x.get("title") or "").strip().casefold()), reverse=reverse)
             elif field in ("TITLE", "NAME"):
-                entries.sort(key=lambda x: (x.get("title") or "").strip().casefold(), reverse=reverse)
+                entries.sort(key=lambda x: (
+                    (x.get("title") or "").strip().casefold(),
+                    (x.get("artist") or "").strip().casefold(),
+                    x.get("added_at", 0)
+                ), reverse=reverse)
             elif field == "ARTIST":
-                entries.sort(key=lambda x: (x.get("artist") or "").strip().casefold(), reverse=reverse)
+                entries.sort(key=lambda x: (
+                    (x.get("artist") or "").strip().casefold(),
+                    (x.get("album") or "").strip().casefold(),
+                    (x.get("title") or "").strip().casefold(),
+                    x.get("added_at", 0)
+                ), reverse=reverse)
             elif field == "ALBUM":
-                entries.sort(key=lambda x: (x.get("album") or "").strip().casefold(), reverse=reverse)
+                entries.sort(key=lambda x: (
+                    (x.get("album") or "").strip().casefold() if (x.get("album") or "").strip() else (x.get("title") or "").strip().casefold(),
+                    (x.get("artist") or "").strip().casefold(),
+                    (x.get("title") or "").strip().casefold(),
+                    x.get("added_at", 0)
+                ), reverse=reverse)
             elif field in ("DURATION", "TIME"):
-                entries.sort(key=lambda x: x.get("duration", 0), reverse=reverse)
+                entries.sort(key=lambda x: (x.get("duration", 0), x.get("added_at", 0)), reverse=reverse)
             elif field in ("ADDED_BY", "USER"):
-                entries.sort(key=lambda x: (x.get("added_by") or "").strip().casefold(), reverse=reverse)
+                entries.sort(key=lambda x: ((x.get("added_by") or "").strip().casefold(), x.get("added_at", 0)), reverse=reverse)
 
         # Set 1-based playlist index
         for idx, e in enumerate(entries):
@@ -699,8 +737,10 @@ class QueueManager:
     def _fetch_track_info(self, track_id):
         if not track_id:
             return None
-        if track_id in self.track_meta_cache:
-            return self.track_meta_cache[track_id]
+        cached = self._lookup_track_meta(track_id)
+        if cached and cached.get("album") and cached.get("title") and cached.get("title") not in ("Трек", "", None):
+            return cached
+
         try:
             url = f"https://open.spotify.com/embed/track/{track_id}"
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
@@ -722,6 +762,31 @@ class QueueManager:
         except Exception:
             pass
 
+        # If album was not in embed, try open.spotify.com/track/{track_id}
+        try:
+            url = f"https://open.spotify.com/track/{track_id}"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            with urllib.request.urlopen(req, timeout=3.5) as resp:
+                html = resp.read().decode("utf-8", errors="ignore")
+            title = ""
+            artist = "Spotify"
+            album = ""
+            m_t = re.search(r"<meta property=\"og:title\" content=\"([^\"]+)\"", html)
+            if m_t:
+                title = m_t.group(1).strip()
+            m_d = re.search(r"<meta name=\"twitter:description\" content=\"([^\"]+)\"", html)
+            if m_d:
+                parts = m_d.group(1).split(" · ")
+                if len(parts) >= 3:
+                    artist = parts[0].strip()
+                    album = parts[1].strip()
+            if title:
+                info = {"title": title, "artist": artist, "uri": f"spotify:track:{track_id}", "album": album, "duration": 0}
+                self.track_meta_cache[track_id] = info
+                return info
+        except Exception:
+            pass
+
         # Fallback to oembed (never rate limited)
         try:
             o_url = f"https://open.spotify.com/oembed?url=https://open.spotify.com/track/{track_id}"
@@ -730,7 +795,7 @@ class QueueManager:
                 d = json.loads(resp.read().decode())
                 t_name = d.get("title")
                 if t_name:
-                    info = {"title": t_name, "artist": "Spotify", "uri": f"spotify:track:{track_id}"}
+                    info = {"title": t_name, "artist": "Spotify", "uri": f"spotify:track:{track_id}", "album": "", "duration": 0}
                     self.track_meta_cache[track_id] = info
                     return info
         except Exception:
@@ -770,12 +835,15 @@ class QueueManager:
             for i in range(start_i, end_i):
                 t = tracks[i]
                 tid = self._extract_id(t.get("uri", ""))
-                if tid in self.track_meta_cache:
-                    cached = self.track_meta_cache[tid]
+                cached = self._lookup_track_meta(tid)
+                if cached:
                     if t.get("title") in ("Трек", "", None):
                         t["title"] = cached.get("title", t.get("title"))
+                    if not t.get("artist") or t.get("artist") == "Spotify":
                         t["artist"] = cached.get("artist", t.get("artist"))
-                elif tid and t.get("title") in ("Трек", "", None):
+                    if not t.get("album") and cached.get("album"):
+                        t["album"] = cached.get("album")
+                if tid and (t.get("title") in ("Трек", "", None) or not t.get("album")):
                     missing_priority.append((i, tid))
 
             if missing_priority:
@@ -784,14 +852,18 @@ class QueueManager:
                     meta = self._fetch_track_info(tid)
                     return i, meta
 
-                with ThreadPoolExecutor(max_workers=8) as executor:
+                with ThreadPoolExecutor(max_workers=6) as executor:
                     results = list(executor.map(_fetch_one, missing_priority))
 
                 updated = False
                 for i, meta in results:
                     if meta and i < len(tracks):
-                        tracks[i]["title"] = meta.get("title", tracks[i].get("title"))
-                        tracks[i]["artist"] = meta.get("artist", tracks[i].get("artist"))
+                        if meta.get("title"):
+                            tracks[i]["title"] = meta["title"]
+                        if meta.get("artist") and meta["artist"] != "Spotify":
+                            tracks[i]["artist"] = meta["artist"]
+                        if meta.get("album"):
+                            tracks[i]["album"] = meta["album"]
                         updated = True
 
                 if updated:
@@ -804,28 +876,35 @@ class QueueManager:
                 if i < start_i or i >= end_i:
                     t = tracks[i]
                     tid = self._extract_id(t.get("uri", ""))
-                    if tid in self.track_meta_cache:
-                        cached = self.track_meta_cache[tid]
+                    cached = self._lookup_track_meta(tid)
+                    if cached:
                         if t.get("title") in ("Трек", "", None):
                             t["title"] = cached.get("title", t.get("title"))
+                        if not t.get("artist") or t.get("artist") == "Spotify":
                             t["artist"] = cached.get("artist", t.get("artist"))
-                    elif tid and t.get("title") in ("Трек", "", None):
+                        if not t.get("album") and cached.get("album"):
+                            t["album"] = cached.get("album")
+                    if tid and (t.get("title") in ("Трек", "", None) or not t.get("album")):
                         remaining_missing.append((i, tid))
 
             if remaining_missing:
                 for batch_start in range(0, len(remaining_missing), 10):
                     batch = remaining_missing[batch_start:batch_start + 10]
-                    with ThreadPoolExecutor(max_workers=6) as executor:
+                    with ThreadPoolExecutor(max_workers=4) as executor:
                         batch_res = list(executor.map(lambda p: (p[0], self._fetch_track_info(p[1])), batch))
                     batch_updated = False
                     for i, meta in batch_res:
                         if meta and i < len(tracks):
-                            tracks[i]["title"] = meta.get("title", tracks[i].get("title"))
-                            tracks[i]["artist"] = meta.get("artist", tracks[i].get("artist"))
+                            if meta.get("title"):
+                                tracks[i]["title"] = meta["title"]
+                            if meta.get("artist") and meta["artist"] != "Spotify":
+                                tracks[i]["artist"] = meta["artist"]
+                            if meta.get("album"):
+                                tracks[i]["album"] = meta["album"]
                             batch_updated = True
                     if batch_updated:
                         self.save_cache()
-                    time.sleep(0.15)
+                    time.sleep(0.3)
 
         t = threading.Thread(target=resolver, daemon=True)
         t.start()

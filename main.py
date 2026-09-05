@@ -626,7 +626,32 @@ class SpotifyMiniWindow(Gtk.Window):
 
         self.queue_list_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         self.queue_scroll.set_child(self.queue_list_box)
-        queue_panel.append(self.queue_scroll)
+
+        # Overlay to host queue scroll + loading spinner
+        self.queue_overlay = Gtk.Overlay()
+        self.queue_overlay.add_css_class("queue-overlay-container")
+        self.queue_overlay.set_child(self.queue_scroll)
+
+        # Loading / updating box
+        self.queue_loading_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.queue_loading_box.add_css_class("queue-loading-overlay")
+        self.queue_loading_box.set_valign(Gtk.Align.CENTER)
+        self.queue_loading_box.set_halign(Gtk.Align.CENTER)
+
+        self.queue_spinner = Gtk.Spinner()
+        self.queue_spinner.add_css_class("queue-loading-spinner")
+        self.queue_spinner.set_size_request(26, 26)
+        self.queue_loading_box.append(self.queue_spinner)
+
+        self.queue_loading_lbl = Gtk.Label(label=t("updating"))
+        self.queue_loading_lbl.add_css_class("queue-loading-label")
+        self.queue_loading_box.append(self.queue_loading_lbl)
+
+        self.queue_overlay.add_overlay(self.queue_loading_box)
+        self.queue_loading_box.set_visible(False)
+        self._hide_loading_timer = None
+
+        queue_panel.append(self.queue_overlay)
 
         self.queue_revealer.set_child(queue_panel)
         self.player_card.append(self.queue_revealer)
@@ -981,7 +1006,30 @@ class SpotifyMiniWindow(Gtk.Window):
             GLib.timeout_add(120, _suppress)
             GLib.timeout_add(300, _restore_opacity)
 
-    def _rebuild_queue_ui(self):
+    def show_queue_loading(self, duration_ms=450):
+        if not hasattr(self, "queue_loading_box") or not self.queue_loading_box:
+            return
+        self.queue_loading_lbl.set_text(t("updating"))
+        self.queue_spinner.start()
+        self.queue_loading_box.set_visible(True)
+        if getattr(self, "_hide_loading_timer", None):
+            GLib.source_remove(self._hide_loading_timer)
+            self._hide_loading_timer = None
+
+        def _hide():
+            if hasattr(self, "queue_spinner") and self.queue_spinner:
+                self.queue_spinner.stop()
+            if hasattr(self, "queue_loading_box") and self.queue_loading_box:
+                self.queue_loading_box.set_visible(False)
+            self._hide_loading_timer = None
+            return False
+
+        self._hide_loading_timer = GLib.timeout_add(duration_ms, _hide)
+
+    def _rebuild_queue_ui(self, order_changed=False):
+        if order_changed:
+            self.show_queue_loading(duration_ms=450)
+
         # Clear existing children
         while True:
             child = self.queue_list_box.get_first_child()

@@ -39,6 +39,7 @@ MESSAGES = {
         "repeat_none": "Repeat: Off",
         "repeat_playlist": "Repeat: Playlist",
         "repeat_track": "Repeat: Track",
+        "updating": "Updating queue...",
     },
     "ru": {
         "queue_title": "Очередь воспроизведения",
@@ -71,6 +72,7 @@ MESSAGES = {
         "repeat_none": "Повтор: Выкл",
         "repeat_playlist": "Повтор: Плейлист",
         "repeat_track": "Повтор: Трек",
+        "updating": "Обновление очереди...",
     },
     "de": {
         "queue_title": "Warteschlange",
@@ -103,6 +105,7 @@ MESSAGES = {
         "repeat_none": "Wiederholen: Aus",
         "repeat_playlist": "Wiederholen: Playlist",
         "repeat_track": "Wiederholen: Titel",
+        "updating": "Warteschlange wird aktualisiert...",
     },
     "es": {
         "queue_title": "Cola de reproducción",
@@ -135,6 +138,7 @@ MESSAGES = {
         "repeat_none": "Repetir: Desactivado",
         "repeat_playlist": "Repetir: Lista",
         "repeat_track": "Repetir: Canción",
+        "updating": "Actualizando cola...",
     },
     "fr": {
         "queue_title": "File d'attente",
@@ -167,6 +171,7 @@ MESSAGES = {
         "repeat_none": "Répéter: Désactivé",
         "repeat_playlist": "Répéter: Playlist",
         "repeat_track": "Répéter: Titre",
+        "updating": "Mise à jour de la file...",
     }
 }
 
