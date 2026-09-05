@@ -232,7 +232,6 @@ class QueueManager:
             return
         pid = self.context_uri.split(":")[-1]
         log_files = glob.glob(os.path.expanduser("~/.cache/spotify/Users/*-user/primary.ldb/*.log"))
-        browser_files = glob.glob(os.path.expanduser("~/.cache/spotify/Browser/Local Storage/leveldb/*.log"))
 
         needs_refresh = False
         try:
@@ -242,23 +241,23 @@ class QueueManager:
                     self._last_ldb_mtime = latest_ldb_mtime
                     needs_refresh = True
 
-            if browser_files:
-                latest_browser_mtime = max(os.path.getmtime(f) for f in browser_files)
-                if latest_browser_mtime > self._last_browser_ldb_mtime:
-                    cur_sort = self._get_playlist_sort_state(pid)
-                    if cur_sort != self._last_sort_state:
-                        self._last_sort_state = cur_sort
-                        needs_refresh = True
+            cur_sort = self._get_playlist_sort_state(pid)
+            if cur_sort != self._last_sort_state:
+                print(f"[QueueManager] Sort state changed for {pid}: {self._last_sort_state} -> {cur_sort}")
+                self._last_sort_state = cur_sort
+                needs_refresh = True
 
             if needs_refresh:
                 fresh_tracks = self._extract_playlist_from_ldb(pid)
-                if fresh_tracks and [t["tid"] for t in fresh_tracks] != [t.get("tid") for t in self.all_context_tracks]:
+                if fresh_tracks:
                     for t in fresh_tracks:
                         tid = t.get("tid")
                         if tid in self.track_meta_cache:
                             cached = self.track_meta_cache[tid]
                             t["title"] = cached.get("title", t.get("title"))
                             t["artist"] = cached.get("artist", t.get("artist"))
+                            t["album"] = cached.get("album", t.get("album", ""))
+                            t["duration"] = cached.get("duration", t.get("duration", 0))
                     with self._lock:
                         self.all_context_tracks = fresh_tracks
                         if self.current_track:
@@ -456,59 +455,48 @@ class QueueManager:
         if not os.path.exists(browser_dir):
             return None
 
-        files = glob.glob(os.path.join(browser_dir, "*.log")) + glob.glob(os.path.join(browser_dir, "*.ldb"))
+        files = sorted(
+            glob.glob(os.path.join(browser_dir, "*.log")) + glob.glob(os.path.join(browser_dir, "*.ldb")),
+            key=os.path.getmtime,
+            reverse=True
+        )
         if not files:
             return None
 
+        target = f"spotify:playlist:{playlist_id}"
         try:
-            mtime = max(os.path.getmtime(f) for f in files)
-            if mtime == self._last_browser_ldb_mtime and playlist_id in self._cached_sort_states:
-                return self._cached_sort_states.get(playlist_id)
-
-            self._last_browser_ldb_mtime = mtime
-            target_key = f"spotify:playlist:{playlist_id}".encode("utf-8")
-
-            for fpath in sorted(files, key=os.path.getmtime, reverse=True):
+            for fpath in files:
                 with open(fpath, "rb") as fp:
                     d = fp.read()
-                if target_key not in d:
+                last_pos = d.rfind(b"sortedState")
+                if last_pos == -1:
                     continue
-
-                idx = 0
-                latest_match = None
-                while True:
-                    pos = d.find(b"sortedState", idx)
-                    if pos == -1:
-                        break
-                    idx = pos + 11
-                    if target_key in d[pos:pos + 1000]:
-                        brace_start = d.find(b"{", pos, pos + 200)
-                        if brace_start != -1:
-                            depth = 0
-                            end = -1
-                            for i in range(brace_start, min(brace_start + 4096, len(d))):
-                                if d[i] == ord("{"):
-                                    depth += 1
-                                elif d[i] == ord("}"):
-                                    depth -= 1
-                                    if depth == 0:
-                                        end = i + 1
-                                        break
-                            if end != -1:
-                                try:
-                                    parsed = json.loads(d[brace_start:end].decode("utf-8", errors="ignore"))
-                                    target_str = f"spotify:playlist:{playlist_id}"
-                                    if target_str in parsed:
-                                        latest_match = parsed[target_str]
-                                except Exception:
-                                    pass
-                if latest_match is not None:
-                    self._cached_sort_states[playlist_id] = latest_match
-                    return latest_match
+                brace_start = d.find(b"{", last_pos, last_pos + 100)
+                if brace_start == -1:
+                    continue
+                depth = 0
+                end = -1
+                for i in range(brace_start, min(brace_start + 8192, len(d))):
+                    if d[i] == ord("{"):
+                        depth += 1
+                    elif d[i] == ord("}"):
+                        depth -= 1
+                        if depth == 0:
+                            end = i + 1
+                            break
+                if end != -1:
+                    try:
+                        data = json.loads(d[brace_start:end].decode("utf-8", errors="ignore"))
+                        if target in data and isinstance(data[target], dict) and data[target].get("field"):
+                            return data[target]
+                        # Explicit {} or target not in data -> custom order (#)
+                        return None
+                    except Exception:
+                        pass
         except Exception as e:
             print(f"Error reading playlist sort state: {e}")
 
-        return self._cached_sort_states.get(playlist_id)
+        return None
 
     def _extract_playlist_from_ldb(self, playlist_id):
         """Extracts all tracks directly from Spotify's LevelDB slice in real authentic sequence."""
@@ -537,34 +525,49 @@ class QueueManager:
             t_end = m.end()
             p = found_chunk.find(b"\x10", t_end, t_end + 60)
             added_at = 0
+            added_by = ""
             if p != -1:
                 added_at, _ = decode_varint(found_chunk, p + 1)
+                user_slice = found_chunk[t_end:p]
+                user_match = re.search(rb"[a-zA-Z0-9_-]{10,40}", user_slice)
+                if user_match:
+                    added_by = user_match.group(0).decode(errors="ignore")
             if tid not in seen:
                 seen.add(tid)
-                entries.append({"tid": tid, "uri": "spotify:track:" + tid, "added_at": added_at})
+                entries.append({"tid": tid, "uri": "spotify:track:" + tid, "added_at": added_at, "added_by": added_by})
 
-        # Populate cached title / artist first
+        # Populate cached title / artist / album / duration
         for e in entries:
             if e["tid"] in self.track_meta_cache:
                 cached = self.track_meta_cache[e["tid"]]
                 e["title"] = cached.get("title", "Трек")
                 e["artist"] = cached.get("artist", "Spotify")
+                e["album"] = cached.get("album", "")
+                e["duration"] = cached.get("duration", 0)
             else:
                 e["title"] = "Трек"
                 e["artist"] = "Spotify"
+                e["album"] = ""
+                e["duration"] = 0
 
-        # Apply active Spotify sort configuration
+        # Apply active Spotify sort configuration for all columns
         sort_state = self._get_playlist_sort_state(playlist_id)
         if sort_state and isinstance(sort_state, dict):
-            field = sort_state.get("field", "").upper()
-            order = sort_state.get("order", "ASC").upper()
+            field = str(sort_state.get("field", "")).upper()
+            order = str(sort_state.get("order", "ASC")).upper()
             reverse = (order == "DESC")
             if field == "ADDED_AT":
                 entries.sort(key=lambda x: x.get("added_at", 0), reverse=reverse)
-            elif field == "TITLE":
-                entries.sort(key=lambda x: (x.get("title") or "").lower(), reverse=reverse)
+            elif field in ("TITLE", "NAME"):
+                entries.sort(key=lambda x: (x.get("title") or "").strip().casefold(), reverse=reverse)
             elif field == "ARTIST":
-                entries.sort(key=lambda x: (x.get("artist") or "").lower(), reverse=reverse)
+                entries.sort(key=lambda x: (x.get("artist") or "").strip().casefold(), reverse=reverse)
+            elif field == "ALBUM":
+                entries.sort(key=lambda x: (x.get("album") or "").strip().casefold(), reverse=reverse)
+            elif field in ("DURATION", "TIME"):
+                entries.sort(key=lambda x: x.get("duration", 0), reverse=reverse)
+            elif field in ("ADDED_BY", "USER"):
+                entries.sort(key=lambda x: (x.get("added_by") or "").strip().casefold(), reverse=reverse)
 
         # Set 1-based playlist index
         for idx, e in enumerate(entries):
@@ -588,8 +591,11 @@ class QueueManager:
                     entity = d.get("props", {}).get("pageProps", {}).get("state", {}).get("data", {}).get("entity", {})
                     t_name = entity.get("name")
                     a_name = ", ".join([a["name"] for a in entity.get("artists", [])]) if entity.get("artists") else "Spotify"
+                    album_obj = entity.get("album") or {}
+                    alb_name = album_obj.get("name", "") if isinstance(album_obj, dict) else ""
+                    dur = entity.get("duration", 0)
                     if t_name:
-                        info = {"title": t_name, "artist": a_name, "uri": f"spotify:track:{track_id}"}
+                        info = {"title": t_name, "artist": a_name, "uri": f"spotify:track:{track_id}", "album": alb_name, "duration": dur}
                         self.track_meta_cache[track_id] = info
                         return info
         except Exception:

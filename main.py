@@ -658,7 +658,7 @@ class SpotifyMiniWindow(Gtk.Window):
         GLib.timeout_add(16, self._on_tick)
         GLib.timeout_add(200, self._on_fast_sync)
         GLib.timeout_add(200, self._on_poll_window_state)
-        GLib.timeout_add(1500, self._on_periodic_queue_check)
+        GLib.timeout_add(400, self._on_periodic_queue_check)
 
     def _on_periodic_queue_check(self):
         if self.mpris.is_available:
@@ -756,7 +756,17 @@ class SpotifyMiniWindow(Gtk.Window):
                 self._schedule_hide(3500)
 
     def on_user_next_clicked(self, *args):
-        self.mpris.next()
+        if getattr(self.mpris, "shuffle", False):
+            self.mpris.next()
+            return
+
+        upcoming = self.queue_mgr.get_upcoming_tracks(limit=1)
+        if upcoming:
+            self.play_track_silent(upcoming[0].get("uri"))
+        elif getattr(self.mpris, "loop_status", "") == "Playlist" and self.queue_mgr.all_context_tracks:
+            self.play_track_silent(self.queue_mgr.all_context_tracks[0].get("uri"))
+        else:
+            self.mpris.next()
 
     def on_user_prev_clicked(self, *args):
         fresh_us = self.mpris.get_fresh_position()
@@ -767,7 +777,16 @@ class SpotifyMiniWindow(Gtk.Window):
             self.scale.set_value(0)
             self.pos_label.set_text("00:00")
             return
-        self.mpris.previous()
+
+        if getattr(self.mpris, "shuffle", False):
+            self.mpris.previous()
+            return
+
+        past = self.queue_mgr.get_past_tracks(limit=100)
+        if past:
+            self.play_track_silent(past[-1].get("uri"))
+        else:
+            self.mpris.previous()
 
     def play_track_silent(self, uri):
         if not uri:
