@@ -62,9 +62,13 @@
    ```bash
    ./run.sh
    ```
+3. (Optional) Install desktop shortcut to your application menu:
+   ```bash
+   ./install.sh
+   ```
 
 > [!TIP]
-> You can also create a desktop shortcut or add `run.sh` to your system startup applications for instant background readiness.
+> Running `./install.sh` registers Spotify Mini Player in your GNOME/desktop applications launcher and dashboard.
 
 ---
 
@@ -123,9 +127,13 @@
    ```bash
    ./run.sh
    ```
+3. (Опционально) Установите ярлык в системное меню приложений GNOME:
+   ```bash
+   ./install.sh
+   ```
 
 > [!TIP]
-> Скрипт `run.sh` можно добавить в автозагрузку системы или создать ярлык на рабочем столе для быстрого доступа.
+> Скрипт `./install.sh` регистрирует мини-плеер в системном меню приложений, связывая его с официальной иконкой и автозапуском.
 
 ---
 
