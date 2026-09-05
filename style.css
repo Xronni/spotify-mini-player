@@ -1,0 +1,461 @@
+/* Spotify Mini Player - Modern Translucent Floating Card */
+
+window.mini-player-window {
+    background-color: transparent;
+    background: transparent;
+}
+
+/* Translucent Glassmorphic Card (15% transparency) */
+.mini-player-card {
+    background-color: rgba(18, 18, 22, 0.85);
+    border-radius: 18px;
+    padding: 10px 14px 12px 14px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+/* Top bar inside the card */
+.top-bar {
+    margin-bottom: 6px;
+}
+
+/* Real Spotify Logo in Top Left */
+.spotify-logo {
+    border-radius: 9999px;
+    min-width: 18px;
+    min-height: 18px;
+}
+
+/* Volume Control in Top Bar (Next to visualizer) */
+.vol-box {
+    margin-left: 6px;
+    padding: 1px 4px;
+    background-color: rgba(255, 255, 255, 0.05);
+    border-radius: 9999px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.vol-btn {
+    border-radius: 9999px;
+    min-width: 20px;
+    min-height: 20px;
+    padding: 1px;
+    background-color: transparent;
+    color: #a1a1aa;
+    border: none;
+    transition: color 150ms ease;
+}
+
+.vol-btn:hover {
+    color: #1ed760;
+}
+
+scale.vol-scale {
+    min-width: 60px;
+    margin-right: 3px;
+}
+
+scale.vol-scale trough {
+    background-color: rgba(255, 255, 255, 0.15);
+    border-radius: 9999px;
+    min-height: 3px;
+    transition: min-height 100ms ease;
+}
+
+scale.vol-scale:hover trough {
+    min-height: 5px;
+}
+
+scale.vol-scale highlight {
+    background: #1ed760;
+    border-radius: 9999px;
+}
+
+scale.vol-scale slider {
+    min-width: 6px;
+    min-height: 6px;
+    margin: -1px;
+    border-radius: 9999px;
+    background-color: #ffffff;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+    opacity: 0;
+    transition: opacity 100ms ease;
+}
+
+scale.vol-scale:hover slider {
+    opacity: 1;
+    min-width: 7px;
+    min-height: 7px;
+}
+
+/* Mini Action Buttons */
+.icon-btn {
+    border-radius: 9999px;
+    min-width: 24px;
+    min-height: 24px;
+    padding: 3px;
+    background-color: transparent;
+    color: #8e8e93;
+    border: none;
+    transition: background-color 150ms ease, color 150ms ease;
+}
+
+.icon-btn:hover {
+    background-color: rgba(255, 255, 255, 0.15);
+    color: #ffffff;
+}
+
+.icon-btn:active {
+    background-color: rgba(255, 255, 255, 0.25);
+}
+
+.icon-btn.pinned-active {
+    color: #1ed760;
+    background-color: rgba(30, 215, 96, 0.2);
+}
+
+.icon-btn.queue-active {
+    color: #1ed760;
+    background-color: rgba(30, 215, 96, 0.2);
+}
+
+/* Equalizer Bars */
+.eq-container {
+    padding: 1px 2px;
+    min-height: 16px;
+}
+
+.eq-bar {
+    background-color: #1ed760;
+    border-radius: 9999px;
+    min-width: 3px;
+    margin: 0 1px;
+}
+
+.eq-bar.paused {
+    background-color: #52525b;
+    opacity: 0.4;
+}
+
+/* Cover art */
+.cover-art-box {
+    min-width: 84px;
+    min-height: 84px;
+    border-radius: 14px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background-color: rgba(0, 0, 0, 0.3);
+}
+
+.cover-picture {
+    min-width: 84px;
+    min-height: 84px;
+    border-radius: 14px;
+}
+
+/* Track information */
+.track-title {
+    font-size: 13.5px;
+    font-weight: 700;
+    color: #ffffff;
+    letter-spacing: -0.2px;
+}
+
+.track-artist {
+    font-size: 11.5px;
+    font-weight: 500;
+    color: #a1a1aa;
+}
+
+.time-label {
+    font-size: 10px;
+    font-weight: 500;
+    font-family: monospace, monospace;
+    color: #71717a;
+}
+
+/* Media Controls */
+.control-btn {
+    border-radius: 9999px;
+    min-width: 28px;
+    min-height: 28px;
+    padding: 4px;
+    background-color: transparent;
+    color: #d4d4d8;
+    border: none;
+    transition: background-color 150ms ease, color 150ms ease;
+}
+
+.control-btn:hover {
+    background-color: rgba(255, 255, 255, 0.15);
+    color: #ffffff;
+}
+
+.control-btn:active {
+    background-color: rgba(255, 255, 255, 0.25);
+}
+
+/* Prominent Play / Pause Button */
+.play-btn {
+    border-radius: 9999px;
+    min-width: 32px;
+    min-height: 32px;
+    padding: 4px;
+    background-color: #1ed760;
+    color: #000000;
+    border: 2px solid transparent;
+    transition: background-color 150ms ease, border-color 150ms ease;
+}
+
+.play-btn:hover {
+    background-color: #24f06e;
+    color: #000000;
+    border-color: rgba(255, 255, 255, 0.4);
+}
+
+.play-btn:active {
+    background-color: #17b34e;
+}
+
+.play-btn.playing {
+    border-color: rgba(255, 255, 255, 0.2);
+}
+
+/* Progress Slider (GtkScale) */
+scale.seek-bar {
+    min-height: 16px;
+    padding: 0;
+    margin: 0;
+}
+
+scale.seek-bar trough {
+    background-color: rgba(255, 255, 255, 0.14);
+    border-radius: 9999px;
+    min-height: 4px;
+    transition: min-height 100ms ease;
+}
+
+scale.seek-bar:hover trough {
+    min-height: 6px;
+}
+
+scale.seek-bar highlight {
+    background: linear-gradient(90deg, #1db954 0%, #1ed760 100%);
+    border-radius: 9999px;
+}
+
+scale.seek-bar slider {
+    min-width: 8px;
+    min-height: 8px;
+    margin: -2px;
+    border-radius: 9999px;
+    background-color: #ffffff;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+    opacity: 0;
+    transition: opacity 100ms ease;
+}
+
+scale.seek-bar:hover slider {
+    opacity: 1;
+    min-width: 9px;
+    min-height: 9px;
+}
+
+/* ========================================================================= */
+/* Queue Drawer / Дропбокс очереди (Spotify Style) */
+/* ========================================================================= */
+
+.queue-panel {
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.queue-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: #8e8e93;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+}
+
+.queue-section-title {
+    font-size: 9.5px;
+    font-weight: 700;
+    color: #71717a;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    margin-top: 6px;
+    margin-bottom: 4px;
+}
+
+.queue-scroll {
+    min-height: 140px;
+    margin-top: 2px;
+    margin-bottom: 4px;
+}
+
+/* Currently Playing Track */
+.queue-current-row {
+    padding: 7px 10px;
+    border-radius: 10px;
+    background-color: rgba(30, 215, 96, 0.12);
+    border: 1px solid rgba(30, 215, 96, 0.35);
+    margin-bottom: 6px;
+}
+
+.queue-current-icon {
+    color: #1ed760;
+    min-width: 16px;
+    min-height: 16px;
+}
+
+.queue-current-title {
+    font-size: 12.5px;
+    font-weight: 700;
+    color: #1ed760;
+}
+
+.queue-current-artist {
+    font-size: 11px;
+    font-weight: 500;
+    color: #d4d4d8;
+}
+
+.queue-playing-badge {
+    font-size: 9.5px;
+    font-weight: 700;
+    color: #1ed760;
+    background-color: rgba(30, 215, 96, 0.2);
+    padding: 2px 7px;
+    border-radius: 9999px;
+    letter-spacing: 0.4px;
+}
+
+/* Upcoming Tracks (Clickable row) */
+.queue-row {
+    padding: 6px 10px;
+    border-radius: 8px;
+    background-color: transparent;
+    margin-bottom: 2px;
+    border: 1px solid transparent;
+    transition: background-color 100ms ease, border-color 100ms ease;
+}
+
+.queue-row:hover {
+    background-color: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.05);
+}
+
+.queue-row:active {
+    background-color: rgba(255, 255, 255, 0.14);
+}
+
+.queue-num {
+    font-size: 11px;
+    font-weight: 600;
+    color: #71717a;
+    min-width: 22px;
+}
+
+.queue-row:hover .queue-num {
+    color: #1ed760;
+}
+
+.queue-item-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: #f4f4f5;
+}
+
+.queue-row:hover .queue-item-title {
+    color: #1ed760;
+}
+
+.queue-item-artist {
+    font-size: 10.5px;
+    font-weight: 400;
+    color: #a1a1aa;
+}
+
+.queue-play-hint {
+    color: #71717a;
+    opacity: 0;
+    transition: opacity 100ms ease, color 100ms ease;
+}
+
+.queue-row:hover .queue-play-hint {
+    opacity: 1;
+    color: #1ed760;
+}
+
+/* History Tracks Section (Ранее играли) */
+.queue-history-row {
+    padding: 5px 10px;
+    border-radius: 8px;
+    background-color: transparent;
+    margin-bottom: 2px;
+    border: 1px solid transparent;
+    opacity: 0.85;
+    transition: background-color 100ms ease, border-color 100ms ease, opacity 100ms ease;
+}
+
+.queue-history-row:hover {
+    background-color: rgba(255, 255, 255, 0.07);
+    border-color: rgba(255, 255, 255, 0.05);
+    opacity: 1.0;
+}
+
+.queue-history-row:active {
+    background-color: rgba(255, 255, 255, 0.12);
+}
+
+.queue-history-icon {
+    color: #71717a;
+    min-width: 15px;
+    min-height: 15px;
+    opacity: 0;
+    transition: opacity 100ms ease, color 100ms ease;
+}
+
+.queue-history-row:hover .queue-history-icon {
+    color: #1ed760;
+    opacity: 1.0;
+}
+
+.queue-history-title {
+    font-size: 11.5px;
+    font-weight: 500;
+    color: #d4d4d8;
+}
+
+.queue-history-row:hover .queue-history-title {
+    color: #1ed760;
+}
+
+.queue-history-artist {
+    font-size: 10px;
+    font-weight: 400;
+    color: #71717a;
+}
+
+/* Offline state */
+.offline-card {
+    background-color: rgba(18, 18, 22, 0.85);
+    border-radius: 18px;
+    padding: 20px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.launch-btn {
+    border-radius: 9999px;
+    padding: 7px 20px;
+    font-size: 12px;
+    font-weight: 700;
+    background-color: #1ed760;
+    color: #000000;
+    border: none;
+    transition: background-color 150ms ease;
+}
+
+.launch-btn:hover {
+    background-color: #24f06e;
+}
