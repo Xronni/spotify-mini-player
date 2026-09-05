@@ -60,34 +60,20 @@ class QueueManager:
         return self.track_meta_cache.get(tid)
 
     def load_cache(self):
+        """On every restart, only restore track_meta_cache (artist/album data).
+        Queue state (all_context_tracks, context, history) is always built fresh
+        from LevelDB — prevents stale ordering and playlist switching bugs."""
         cache_file = os.path.join(CACHE_DIR, "queue_cache.json")
         if os.path.exists(cache_file):
             try:
                 with open(cache_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    c_name = data.get("context_name", "")
-                    self.context_name = c_name if is_valid_name(c_name) else ""
-                    self.context_uri = data.get("context_uri", "")
-                    self.all_context_tracks = data.get("all_context_tracks", [])
-                    self.session_history = data.get("session_history", [])
-                    self.context_cache = data.get("context_cache", {})
+                    # Only restore artist/metadata cache; queue state starts fresh
                     self.track_meta_cache = data.get("track_meta_cache", {})
                     # Clean any legacy bogus "Spotify" artist entries
                     for k, v in self.track_meta_cache.items():
                         if (v.get("artist") or "").strip().casefold() == "spotify":
                             v["artist"] = ""
-                    for t in self.all_context_tracks:
-                        if (t.get("artist") or "").strip().casefold() == "spotify":
-                            t["artist"] = ""
-                    self._last_sort_state = data.get("sort_state", None)
-                    if self.context_uri and self.context_uri.startswith("spotify:playlist:"):
-                        pid = self.context_uri.split(":")[-1]
-                        active_sort = self._get_playlist_sort_state(pid)
-                        if active_sort != self._last_sort_state:
-                            self._last_sort_state = active_sort
-                            fresh_tracks = self._extract_playlist_from_ldb(pid)
-                            if fresh_tracks:
-                                self.all_context_tracks = fresh_tracks
             except Exception as e:
                 print(f"Error loading queue cache: {e}")
 

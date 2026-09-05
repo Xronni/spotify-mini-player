@@ -1051,8 +1051,11 @@ class SpotifyMiniWindow(Gtk.Window):
         self._hide_loading_timer = GLib.timeout_add(duration_ms, _hide)
 
     def _rebuild_queue_ui(self, order_changed=False):
-        if order_changed:
-            self.show_queue_loading(duration_ms=450)
+        # Always show loading spinner and freeze the list visually
+        # to prevent partial/flickering redraws during rebuild
+        self.show_queue_loading(duration_ms=400)
+        if hasattr(self, "queue_list_box") and self.queue_list_box:
+            self.queue_list_box.set_opacity(0.0)
 
         vadj = self.queue_scroll.get_vadjustment() if hasattr(self, "queue_scroll") and self.queue_scroll else None
         saved_scroll_y = vadj.get_value() if vadj else 0.0
@@ -1122,8 +1125,14 @@ class SpotifyMiniWindow(Gtk.Window):
                 info_box.append(t_lbl)
 
                 artist_val = (track.get("artist") or "").strip()
-                if artist_val.casefold() == "spotify":
-                    artist_val = ""
+                if not artist_val or artist_val.casefold() == "spotify":
+                    # Enrich from track_meta_cache (fetched artist data)
+                    tid = (track.get("uri") or "").split(":")[-1]
+                    if tid:
+                        meta = self.queue_mgr.track_meta_cache.get(tid) or {}
+                        artist_val = (meta.get("artist") or "").strip()
+                        if artist_val.casefold() == "spotify":
+                            artist_val = ""
                 if artist_val:
                     a_lbl = Gtk.Label(label=artist_val)
                     a_lbl.set_xalign(0.0)
@@ -1228,8 +1237,14 @@ class SpotifyMiniWindow(Gtk.Window):
                 info_box.append(t_lbl)
 
                 artist_val = (track.get("artist") or "").strip()
-                if artist_val.casefold() == "spotify":
-                    artist_val = ""
+                if not artist_val or artist_val.casefold() == "spotify":
+                    # Enrich from track_meta_cache (fetched artist data)
+                    tid = (track.get("uri") or "").split(":")[-1]
+                    if tid:
+                        meta = self.queue_mgr.track_meta_cache.get(tid) or {}
+                        artist_val = (meta.get("artist") or "").strip()
+                        if artist_val.casefold() == "spotify":
+                            artist_val = ""
                 if artist_val:
                     a_lbl = Gtk.Label(label=artist_val)
                     a_lbl.set_xalign(0.0)
@@ -1273,6 +1288,13 @@ class SpotifyMiniWindow(Gtk.Window):
                     return False
                 GLib.idle_add(_restore_scroll)
                 GLib.timeout_add(50, _restore_scroll)
+
+        # Reveal the rebuilt list atomically (after one full GTK frame)
+        def _show_list():
+            if hasattr(self, "queue_list_box") and self.queue_list_box:
+                self.queue_list_box.set_opacity(1.0)
+            return False
+        GLib.idle_add(_show_list)
 
     def _on_poll_window_state(self):
         if getattr(self, "_switching_track", False):
@@ -1355,7 +1377,7 @@ class SpotifyMiniWindow(Gtk.Window):
         new_loop = getattr(self.mpris, "loop_status", "None")
         self._last_loop_status = new_loop
         self._update_playback_options_ui()
-        if "Playlist" in (old_loop, new_loop) and old_loop != new_loop:
+        if old_loop != new_loop:
             self._rebuild_queue_ui(order_changed=True)
             self._scroll_to_current_track()
 
@@ -1363,7 +1385,7 @@ class SpotifyMiniWindow(Gtk.Window):
         old_loop = getattr(self, "_last_loop_status", None)
         self._last_loop_status = loop_status
         GLib.idle_add(self._update_playback_options_ui)
-        if old_loop is not None and "Playlist" in (old_loop, loop_status) and old_loop != loop_status:
+        if old_loop is not None and old_loop != loop_status:
             def _refresh():
                 self._rebuild_queue_ui(order_changed=True)
                 self._scroll_to_current_track()
@@ -1647,7 +1669,7 @@ class SpotifyMiniWindow(Gtk.Window):
             self.show_osd(4500)
         return False
 
-    def _on_mpris_status(self, status):
+    def _on_status_updated(self, status):
         GLib.idle_add(lambda: self._apply_status(status))
 
     def _apply_status(self, status):
@@ -1660,7 +1682,7 @@ class SpotifyMiniWindow(Gtk.Window):
             self.visualizer.stop()
         return False
 
-    def _on_mpris_metadata(self, track_changed=False, is_user_action=False):
+    def _on_metadata_updated(self, track_changed=False, is_user_action=False):
         GLib.idle_add(lambda: self._apply_metadata(track_changed=track_changed, is_user_action=is_user_action))
 
     def _apply_metadata(self, track_changed=False, is_user_action=False):
@@ -1700,12 +1722,9 @@ class SpotifyMiniWindow(Gtk.Window):
             self.scale.set_value(0)
             self.pos_label.set_text("00:00")
 
-            # Update current track in queue
+            # Update current track in queue and rebuild full UI
             self.queue_mgr.update_current_track(self.mpris.title, self.mpris.artist, self.mpris.track_id, album=self.mpris.album)
-            if self.is_queue_open:
-                GLib.idle_add(self._scroll_to_current_track)
-                GLib.timeout_add(50, self._scroll_to_current_track)
-                GLib.timeout_add(150, self._scroll_to_current_track)
+            GLib.idle_add(lambda: self._rebuild_queue_ui(order_changed=True) or False)
         else:
             fresh_us = self.mpris.get_fresh_position()
             self.anchor_pos = fresh_us / 1_000_000.0
