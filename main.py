@@ -315,6 +315,8 @@ class SpotifyMiniWindow(Gtk.Window):
         self.seek_timer_id = None
         self.vol_debounce_id = None
         self.shuffle_history = []
+        self._switching_track = False
+        self._was_visible_before_spotify = False
 
         # Queue Manager
         self.queue_mgr = QueueManager(on_queue_changed_cb=self._rebuild_queue_ui)
@@ -750,7 +752,8 @@ class SpotifyMiniWindow(Gtk.Window):
                 target_y = None
 
         if target_y is None:
-            past_tracks = self.queue_mgr.get_past_tracks(limit=40)
+            is_loop = getattr(self.mpris, "loop_status", "Playlist") != "None"
+            past_tracks = self.queue_mgr.get_past_tracks(limit=40, loop=is_loop)
             cur_top = (26.0 + len(past_tracks) * 36.0 + 26.0) if past_tracks else 26.0
             cur_h = 42.0
             target_y = cur_top + (cur_h / 2.0) - (viewport_h / 2.0)
@@ -786,6 +789,9 @@ class SpotifyMiniWindow(Gtk.Window):
                 self._schedule_hide(3500)
 
     def on_user_next_clicked(self, *args):
+        self._switching_track = True
+        GLib.timeout_add(700, lambda: setattr(self, "_switching_track", False) or False)
+
         is_shuffle = getattr(self.mpris, "shuffle", False)
         all_tracks = self.queue_mgr.all_context_tracks
 
@@ -816,7 +822,8 @@ class SpotifyMiniWindow(Gtk.Window):
                 self.mpris.next()
                 return
 
-        upcoming = self.queue_mgr.get_upcoming_tracks(limit=1)
+        is_loop = getattr(self.mpris, "loop_status", "Playlist") != "None"
+        upcoming = self.queue_mgr.get_upcoming_tracks(limit=1, loop=is_loop)
         if upcoming:
             self.play_track_silent(upcoming[0].get("uri"))
         elif getattr(self.mpris, "loop_status", "") == "Playlist" and all_tracks:
@@ -834,8 +841,12 @@ class SpotifyMiniWindow(Gtk.Window):
             self.pos_label.set_text("00:00")
             return
 
+        self._switching_track = True
+        GLib.timeout_add(700, lambda: setattr(self, "_switching_track", False) or False)
+
         is_shuffle = getattr(self.mpris, "shuffle", False)
         all_tracks = self.queue_mgr.all_context_tracks
+        is_loop = getattr(self.mpris, "loop_status", "Playlist") != "None"
 
         if is_shuffle:
             if hasattr(self, "shuffle_history") and self.shuffle_history:
@@ -847,14 +858,14 @@ class SpotifyMiniWindow(Gtk.Window):
                     self.play_track_silent(prev_uri)
                     return
 
-            past = self.queue_mgr.get_past_tracks(limit=10)
+            past = self.queue_mgr.get_past_tracks(limit=10, loop=is_loop)
             if past:
                 self.play_track_silent(past[-1].get("uri"))
             else:
                 self.mpris.previous()
             return
 
-        past = self.queue_mgr.get_past_tracks(limit=10)
+        past = self.queue_mgr.get_past_tracks(limit=10, loop=is_loop)
         if past:
             self.play_track_silent(past[-1].get("uri"))
         elif getattr(self.mpris, "loop_status", "") == "Playlist" and all_tracks:
@@ -865,6 +876,9 @@ class SpotifyMiniWindow(Gtk.Window):
     def play_track_silent(self, uri):
         if not uri:
             return
+
+        self._switching_track = True
+        GLib.timeout_add(700, lambda: setattr(self, "_switching_track", False) or False)
 
         # Normalize URI format
         if uri.startswith("/com/spotify/track/"):
@@ -916,7 +930,7 @@ class SpotifyMiniWindow(Gtk.Window):
             my_xid = surface.get_xid()
             set_window_always_above(my_xid, True)
 
-        # Multi-stage Spotify window suppression to guarantee it stays in background
+        # Streamlined Spotify window suppression
         if not sp_was_active and sp_win:
             def _suppress():
                 try:
@@ -929,10 +943,20 @@ class SpotifyMiniWindow(Gtk.Window):
                             x11.XLowerWindow(disp, sp_win)
                         if isinstance(surface, GdkX11.X11Surface):
                             x11.XRaiseWindow(disp, surface.get_xid())
+                        if active_win and active_win != sp_win:
+                            root = x11.XDefaultRootWindow(disp)
+                            class XClientMessageEvent(ctypes.Structure):
+                                _fields_ = [
+                                    ('type', ctypes.c_int), ('serial', ctypes.c_ulong), ('send_event', ctypes.c_int),
+                                    ('display', ctypes.c_void_p), ('window', ctypes.c_ulong), ('message_type', ctypes.c_ulong),
+                                    ('format', ctypes.c_int), ('data', ctypes.c_long * 5)
+                                ]
+                            atom_active = x11.XInternAtom(disp, b'_NET_ACTIVE_WINDOW', False)
+                            event = XClientMessageEvent(33, 0, 1, disp, active_win, atom_active, 32, (ctypes.c_long * 5)(2, 0, 0, 0, 0))
+                            mask = (1 << 19) | (1 << 20)
+                            x11.XSendEvent(disp, root, False, mask, ctypes.byref(event))
                         x11.XFlush(disp)
                         x11.XCloseDisplay(disp)
-                    if active_win and active_win != sp_win:
-                        activate_window(active_win)
                 except Exception as e:
                     print(f"Error suppressing Spotify: {e}")
                 return False
@@ -949,15 +973,13 @@ class SpotifyMiniWindow(Gtk.Window):
                         x11.XChangeProperty(disp, sp_win, atom_opacity, 6, 32, 0, ctypes.byref(opacity_full), 1)
                         x11.XFlush(disp)
                         x11.XCloseDisplay(disp)
-                    if active_win and active_win != sp_win:
-                        activate_window(active_win)
                 except Exception as e:
                     print(f"Error restoring Spotify opacity: {e}")
                 return False
 
-            for delay_ms in (15, 40, 80, 150, 250, 400):
-                GLib.timeout_add(delay_ms, _suppress)
-            GLib.timeout_add(550, _restore_opacity)
+            GLib.timeout_add(20, _suppress)
+            GLib.timeout_add(120, _suppress)
+            GLib.timeout_add(300, _restore_opacity)
 
     def _rebuild_queue_ui(self):
         # Clear existing children
@@ -968,8 +990,9 @@ class SpotifyMiniWindow(Gtk.Window):
             self.queue_list_box.remove(child)
 
         self.curr_row = None
-        past_tracks = self.queue_mgr.get_past_tracks(limit=40)
-        upcoming_tracks = self.queue_mgr.get_upcoming_tracks(limit=60)
+        is_loop = getattr(self.mpris, "loop_status", "Playlist") != "None"
+        past_tracks = self.queue_mgr.get_past_tracks(limit=40, loop=is_loop)
+        upcoming_tracks = self.queue_mgr.get_upcoming_tracks(limit=60, loop=is_loop)
         curr_track = self.queue_mgr.current_track or {}
         curr_title = self.mpris.title or curr_track.get("title", t("no_track"))
         curr_artist = self.mpris.artist or curr_track.get("artist", "Spotify")
@@ -1047,15 +1070,11 @@ class SpotifyMiniWindow(Gtk.Window):
         self.curr_row.add_css_class("queue-current-row")
 
         curr_num = curr_track.get("track_num")
-        if curr_num:
-            num_lbl = Gtk.Label(label=f"{curr_num}")
-            num_lbl.set_xalign(1.0)
-            num_lbl.add_css_class("queue-num")
-            self.curr_row.append(num_lbl)
-
-        eq_icon = Gtk.Image.new_from_icon_name("audio-speakers-symbolic")
-        eq_icon.add_css_class("queue-current-icon")
-        self.curr_row.append(eq_icon)
+        num_lbl = Gtk.Label(label=f"{curr_num}" if curr_num else "")
+        num_lbl.set_xalign(1.0)
+        num_lbl.add_css_class("queue-num")
+        num_lbl.add_css_class("queue-current-num")
+        self.curr_row.append(num_lbl)
 
         info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         info_box.set_hexpand(True)
@@ -1074,9 +1093,16 @@ class SpotifyMiniWindow(Gtk.Window):
 
         self.curr_row.append(info_box)
 
+        status_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        eq_icon = Gtk.Image.new_from_icon_name("audio-speakers-symbolic")
+        eq_icon.add_css_class("queue-current-icon")
+        status_box.append(eq_icon)
+
         badge = Gtk.Label(label=t("playing"))
         badge.add_css_class("queue-playing-badge")
-        self.curr_row.append(badge)
+        status_box.append(badge)
+
+        self.curr_row.append(status_box)
 
         self.queue_list_box.append(self.curr_row)
 
@@ -1140,6 +1166,9 @@ class SpotifyMiniWindow(Gtk.Window):
         GLib.timeout_add(150, self._scroll_to_current_track)
 
     def _on_poll_window_state(self):
+        if getattr(self, "_switching_track", False):
+            return True
+
         sp_on_screen = is_spotify_on_screen() or is_spotify_active()
 
         if sp_on_screen:
@@ -1147,14 +1176,16 @@ class SpotifyMiniWindow(Gtk.Window):
             if self.get_visible():
                 self._cancel_hide_timer()
                 self._cancel_fade()
+                self._was_visible_before_spotify = True
                 self.set_visible(False)
                 self._hidden_due_to_spotify = True
         else:
             # Spotify desktop is minimized or in background
             if getattr(self, "_hidden_due_to_spotify", False):
                 self._hidden_due_to_spotify = False
-                # If window was pinned, restore visibility!
-                if self.is_pinned:
+                was_vis = getattr(self, "_was_visible_before_spotify", False)
+                # If window was pinned or visible before, restore visibility!
+                if self.is_pinned or was_vis:
                     self.set_opacity(1.0)
                     self.set_visible(True)
                     surface = self.get_surface()

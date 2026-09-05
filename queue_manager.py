@@ -119,40 +119,55 @@ class QueueManager:
                         return idx
         return -1
 
-    def get_past_tracks(self, limit=40):
-        """Returns ONLY the tracks that come BEFORE the current track in this playlist, in strict 1..curr_idx-1 order."""
+    def get_past_tracks(self, limit=40, loop=True):
+        """Returns tracks that come BEFORE the current track in this playlist, wrapping if loop=True."""
         if self.all_context_tracks and self.current_track:
             curr_idx = self._find_track_idx(
                 self.current_track.get("uri", ""),
                 self.current_track.get("title", "")
             )
-            if curr_idx > 0:
+            if curr_idx < 0:
+                curr_idx = getattr(self, "last_valid_idx", -1)
+
+            if curr_idx >= 0:
                 self.last_valid_idx = curr_idx
-                start_i = max(0, curr_idx - limit) if limit else 0
-                return self.all_context_tracks[start_i:curr_idx]
-            elif curr_idx == 0:
-                self.last_valid_idx = 0
-                return []
+                total = len(self.all_context_tracks)
+                if total > 0:
+                    past_before = self.all_context_tracks[max(0, curr_idx - limit):curr_idx]
+                    if loop and limit and len(past_before) < limit and total > 1:
+                        wrap_needed = limit - len(past_before)
+                        start_w = max(curr_idx + 1, total - wrap_needed)
+                        wrapped = self.all_context_tracks[start_w:]
+                        return wrapped + past_before
+                    return past_before
             else:
                 # If current_track is temporarily off-playlist, preserve past tracks using last_valid_idx
                 l_idx = getattr(self, "last_valid_idx", 0)
-                if l_idx > 0 and l_idx < len(self.all_context_tracks):
+                if 0 < l_idx < len(self.all_context_tracks):
                     start_i = max(0, l_idx - limit) if limit else 0
                     return self.all_context_tracks[start_i:l_idx]
         return []
 
-    def get_upcoming_tracks(self, limit=60):
-        """Returns upcoming tracks in the current playlist in order."""
+    def get_upcoming_tracks(self, limit=60, loop=True):
+        """Returns upcoming tracks in the current playlist in order, wrapping if loop=True."""
         if self.all_context_tracks and self.current_track:
             curr_idx = self._find_track_idx(
                 self.current_track.get("uri", ""),
                 self.current_track.get("title", "")
             )
+            if curr_idx < 0:
+                curr_idx = getattr(self, "last_valid_idx", -1)
+
             if curr_idx >= 0:
                 self.last_valid_idx = curr_idx
-                if curr_idx + 1 < len(self.all_context_tracks):
-                    end_i = curr_idx + 1 + limit if limit else len(self.all_context_tracks)
-                    return self.all_context_tracks[curr_idx + 1:end_i]
+                total = len(self.all_context_tracks)
+                if total > 0:
+                    tracks_after = self.all_context_tracks[curr_idx + 1:]
+                    if loop and limit and len(tracks_after) < limit and total > 1:
+                        wrap_needed = limit - len(tracks_after)
+                        wrapped = self.all_context_tracks[:min(wrap_needed, curr_idx)]
+                        return tracks_after + wrapped
+                    return tracks_after[:limit] if limit else tracks_after
             else:
                 # If current_track is temporarily off-playlist, preserve upcoming tracks using last_valid_idx
                 l_idx = getattr(self, "last_valid_idx", 0)
@@ -235,8 +250,10 @@ class QueueManager:
         if not self.context_uri or not self.context_uri.startswith("spotify:playlist:"):
             return
         pid = self.context_uri.split(":")[-1]
-        log_files = glob.glob(os.path.expanduser("~/.cache/spotify/Users/*-user/primary.ldb/*.log"))
-        browser_files = glob.glob(os.path.expanduser("~/.cache/spotify/Browser/Local Storage/leveldb/*.log"))
+        log_files = glob.glob(os.path.expanduser("~/.cache/spotify/Users/*-user/primary.ldb/*.log")) + \
+                    glob.glob(os.path.expanduser("~/.cache/spotify/Users/*-user/primary.ldb/*.ldb"))
+        browser_files = glob.glob(os.path.expanduser("~/.cache/spotify/Browser/Local Storage/leveldb/*.log")) + \
+                        glob.glob(os.path.expanduser("~/.cache/spotify/Browser/Local Storage/leveldb/*.ldb"))
 
         needs_refresh = False
         try:
@@ -246,21 +263,11 @@ class QueueManager:
                     self._last_ldb_mtime = latest_ldb_mtime
                     needs_refresh = True
 
-            if browser_files:
-                latest_browser_mtime = max(os.path.getmtime(f) for f in browser_files)
-                if latest_browser_mtime > self._last_browser_ldb_mtime:
-                    self._last_browser_ldb_mtime = latest_browser_mtime
-                    cur_sort = self._get_playlist_sort_state(pid)
-                    if cur_sort != self._last_sort_state:
-                        print(f"[QueueManager] Sort state changed for {pid}: {self._last_sort_state} -> {cur_sort}")
-                        self._last_sort_state = cur_sort
-                        needs_refresh = True
-            else:
-                cur_sort = self._get_playlist_sort_state(pid)
-                if cur_sort != self._last_sort_state:
-                    print(f"[QueueManager] Sort state changed for {pid}: {self._last_sort_state} -> {cur_sort}")
-                    self._last_sort_state = cur_sort
-                    needs_refresh = True
+            cur_sort = self._get_playlist_sort_state(pid)
+            if cur_sort != self._last_sort_state:
+                print(f"[QueueManager] Sort state changed for {pid}: {self._last_sort_state} -> {cur_sort}")
+                self._last_sort_state = cur_sort
+                needs_refresh = True
 
             if needs_refresh:
                 fresh_tracks = self._extract_playlist_from_ldb(pid)
@@ -345,6 +352,14 @@ class QueueManager:
                 self._last_sort_state = active_sort
                 fresh_tracks = self._extract_playlist_from_ldb(cur_pid)
                 if fresh_tracks:
+                    for t in fresh_tracks:
+                        tid = t.get("tid")
+                        if tid in self.track_meta_cache:
+                            cached = self.track_meta_cache[tid]
+                            t["title"] = cached.get("title", t.get("title"))
+                            t["artist"] = cached.get("artist", t.get("artist"))
+                            t["album"] = cached.get("album", t.get("album", ""))
+                            t["duration"] = cached.get("duration", t.get("duration", 0))
                     with self._lock:
                         self.all_context_tracks = fresh_tracks
 
