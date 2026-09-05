@@ -114,7 +114,16 @@ class QueueManager:
                 self.current_track.get("title", "")
             )
             if curr_idx > 0:
+                self.last_valid_idx = curr_idx
                 return self.all_context_tracks[:curr_idx]
+            elif curr_idx == 0:
+                self.last_valid_idx = 0
+                return []
+            else:
+                # If current_track is temporarily off-playlist, preserve past tracks using last_valid_idx
+                l_idx = getattr(self, "last_valid_idx", 0)
+                if l_idx > 0 and l_idx < len(self.all_context_tracks):
+                    return self.all_context_tracks[:l_idx]
         return []
 
     def get_upcoming_tracks(self, limit=100):
@@ -124,8 +133,15 @@ class QueueManager:
                 self.current_track.get("uri", ""),
                 self.current_track.get("title", "")
             )
-            if curr_idx >= 0 and curr_idx + 1 < len(self.all_context_tracks):
-                return self.all_context_tracks[curr_idx + 1:curr_idx + 1 + limit]
+            if curr_idx >= 0:
+                self.last_valid_idx = curr_idx
+                if curr_idx + 1 < len(self.all_context_tracks):
+                    return self.all_context_tracks[curr_idx + 1:curr_idx + 1 + limit]
+            else:
+                # If current_track is temporarily off-playlist, preserve upcoming tracks using last_valid_idx
+                l_idx = getattr(self, "last_valid_idx", 0)
+                if l_idx + 1 < len(self.all_context_tracks):
+                    return self.all_context_tracks[l_idx + 1:l_idx + 1 + limit]
         return []
 
     def _get_playlist_name_from_ldb(self, playlist_id):
@@ -224,7 +240,7 @@ class QueueManager:
             print(f"Error checking for playlist updates: {e}")
 
     def _find_playlist_for_track(self, track_id):
-        """Quickly scans local LevelDB to find which user playlist slice contains track_id."""
+        """Quickly scans local LevelDB to find which USER playlist slice contains track_id."""
         if not track_id:
             return None
         files = glob.glob(os.path.expanduser("~/.cache/spotify/Users/*-user/primary.ldb/*"))
@@ -241,6 +257,13 @@ class QueueManager:
                     continue
                 for m in re.finditer(rb"1!pl#slc#\x27spotify:playlist:([a-zA-Z0-9]{22})#", d):
                     pid = m.group(1).decode()
+                    # Strictly ignore Spotify algorithmic, radio, and autoplay playlists
+                    if pid.startswith("37i9dQ"):
+                        continue
+                    # Must have a valid user playlist name
+                    name = self._get_playlist_name_from_ldb(pid)
+                    if not name or not is_valid_name(name):
+                        continue
                     pos = m.start()
                     next_slice = d.find(b"1!pl#", pos + len(m.group(0)))
                     chunk = d[pos:next_slice] if next_slice != -1 else d[pos:pos + 400000]
@@ -275,6 +298,7 @@ class QueueManager:
         # 1. Check if current track is already within our active context tracks
         found_idx = self._find_track_idx(uri, title)
         if found_idx >= 0:
+            self.last_valid_idx = found_idx
             t = self.all_context_tracks[found_idx]
             if t.get("title") in ("Трек", "", None, "Track"):
                 t["title"] = title
@@ -307,6 +331,7 @@ class QueueManager:
             if fresh_idx >= 0:
                 with self._lock:
                     self.all_context_tracks = fresh_tracks
+                    self.last_valid_idx = fresh_idx
                     self.current_track = {
                         "title": title,
                         "artist": artist,
@@ -319,9 +344,9 @@ class QueueManager:
                 self._resolve_missing_tracks_async(fresh_idx)
                 return
 
-        # Case B: User switched to another playlist!
+        # Case B: User switched to another real USER playlist!
         detected_pid = self._find_playlist_for_track(curr_id) if curr_id else None
-        if detected_pid:
+        if detected_pid and not detected_pid.startswith("37i9dQ"):
             fresh_tracks = self._extract_playlist_from_ldb(detected_pid)
             fresh_idx = -1
             for idx, t in enumerate(fresh_tracks):
@@ -342,6 +367,7 @@ class QueueManager:
                 elif not is_valid_name(self.context_name):
                     self.context_name = album if is_valid_name(album) else ""
                 self.all_context_tracks = fresh_tracks
+                self.last_valid_idx = fresh_idx if fresh_idx >= 0 else 0
                 self.current_track = {
                     "title": title,
                     "artist": artist,
@@ -356,7 +382,21 @@ class QueueManager:
                 self._resolve_missing_tracks_async(fresh_idx)
             return
 
-        # Case C: Not found in any local playlist slice — sync async via restore state or album
+        # Case C: Track is off-playlist (e.g. temporary album playback or single song).
+        # CRITICAL: DO NOT DESTROY THE USER'S ACTIVE PLAYLIST!
+        if self.context_uri and self.context_uri.startswith("spotify:playlist:") and self.all_context_tracks:
+            # Preserve all_context_tracks, context_uri, and context_name!
+            fallback_num = getattr(self, "last_valid_idx", 0) + 1
+            self.current_track = {
+                "title": title,
+                "artist": artist,
+                "uri": uri,
+                "track_num": fallback_num
+            }
+            self.notify()
+            return
+
+        # Case D: No active user playlist was loaded — fallback to sync
         self.current_track = {"title": title, "artist": artist, "uri": uri}
         if not is_valid_name(self.context_name) and is_valid_name(album):
             self.context_name = album
@@ -708,8 +748,10 @@ class QueueManager:
                             chunk = c[p:min(len(c), p + 400)]
                             m = re.search(rb"context_uri[^\x00]*?(spotify:(?:playlist|album):[a-zA-Z0-9]+)", chunk)
                             if m and val > best_ts:
-                                best_ts = val
-                                best_ctx = m.group(1).decode()
+                                cand = m.group(1).decode()
+                                if not cand.startswith("spotify:playlist:37i9dQ"):
+                                    best_ts = val
+                                    best_ctx = cand
                     except Exception:
                         pass
                     pos = p + 1
@@ -723,9 +765,11 @@ class QueueManager:
             try:
                 with open(f, "rb") as fp:
                     c = fp.read()
-                playlists = re.findall(rb"spotify:playlist:[a-zA-Z0-9]{22}", c)
-                if playlists:
-                    return playlists[-1].decode()
+                playlists = re.findall(rb"spotify:playlist:([a-zA-Z0-9]{22})", c)
+                for p in reversed(playlists):
+                    pid = p.decode()
+                    if not pid.startswith("37i9dQ"):
+                        return f"spotify:playlist:{pid}"
             except Exception:
                 pass
         return None

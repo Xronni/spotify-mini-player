@@ -1338,12 +1338,15 @@ class SpotifyMiniWindow(Gtk.Window):
         self.artist_label.set_text(artist_text)
         self.artist_label.set_tooltip_text(artist_text)
 
-        self.duration_sec = self.mpris.length_us / 1_000_000.0
+        new_duration = self.mpris.length_us / 1_000_000.0
+        self.duration_sec = new_duration
         self.scale.set_range(0, max(1, self.duration_sec))
         self.dur_label.set_text(format_time(self.duration_sec))
 
         if track_changed or self.mpris.track_id != self.last_track_id:
-            was_at_end = (self.last_sync_pos > 0 and self.duration_sec > 0 and self.last_sync_pos >= max(1, self.duration_sec - 2.5))
+            prev_duration = getattr(self, "curr_track_duration", 0.0)
+            prev_pos = getattr(self, "last_sync_pos", 0.0)
+            self.curr_track_duration = new_duration
             self.last_track_id = self.mpris.track_id
             self.anchor_pos = 0.0
             self.anchor_time = time.time()
@@ -1351,18 +1354,33 @@ class SpotifyMiniWindow(Gtk.Window):
             self.scale.set_value(0)
             self.pos_label.set_text("00:00")
 
-            # If track finished naturally and Spotify started an off-playlist album track,
-            # seamlessly advance to the next track of our playlist:
-            if was_at_end and self.queue_mgr.all_context_tracks:
-                upcoming = self.queue_mgr.get_upcoming_tracks(limit=1)
+            # Check if Spotify drifted off our active user playlist:
+            if self.queue_mgr.all_context_tracks and self.queue_mgr.context_uri.startswith("spotify:playlist:"):
                 curr_match = self.queue_mgr._find_track_idx(self.mpris.track_id, self.mpris.title)
-                if upcoming and curr_match == -1:
+                if curr_match == -1:
+                    # The track playing in Spotify is NOT in our active playlist!
                     tid = self.queue_mgr._extract_id(self.mpris.track_id)
                     new_pid = self.queue_mgr._find_playlist_for_track(tid) if tid else None
-                    if not new_pid:
-                        next_t = upcoming[0]
-                        self.play_track_silent(next_t.get("uri"))
-                        return False
+
+                    # Only allow playlist switch if the user was actively using Spotify on-screen
+                    # and chose a track from another real user playlist
+                    sp_active = is_spotify_active() or is_spotify_on_screen()
+                    if new_pid and sp_active:
+                        pass
+                    else:
+                        # Song finished naturally or Spotify autoplayed an off-playlist track.
+                        # Seamlessly advance to the next track of our playlist:
+                        upcoming = self.queue_mgr.get_upcoming_tracks(limit=1)
+                        if upcoming:
+                            print(f"[AutoAdvance] Song finished / off-playlist track detected. Advancing to playlist track: {upcoming[0].get('title')}")
+                            next_t = upcoming[0]
+                            self.play_track_silent(next_t.get("uri"))
+                            return False
+                        elif getattr(self.mpris, "loop_status", "") == "Playlist":
+                            first_t = self.queue_mgr.all_context_tracks[0]
+                            print(f"[AutoAdvance] Playlist finished with Repeat on. Looping to: {first_t.get('title')}")
+                            self.play_track_silent(first_t.get("uri"))
+                            return False
 
             # Update current track in queue
             self.queue_mgr.update_current_track(self.mpris.title, self.mpris.artist, self.mpris.track_id, album=self.mpris.album)
