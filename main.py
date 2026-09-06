@@ -278,6 +278,22 @@ def set_window_always_above(xid, enable=True):
     except Exception as e:
         print(f"Failed to set window always above: {e}")
 
+def set_window_motif_hints(xid):
+    """Sets Motif WM hints so window manager allows minimizing undecorated windows."""
+    try:
+        x11 = ctypes.CDLL('libX11.so.6')
+        x11.XOpenDisplay.restype = ctypes.c_void_p
+        disp = x11.XOpenDisplay(None)
+        if not disp:
+            return
+        atom_motif = x11.XInternAtom(disp, b"_MOTIF_WM_HINTS", False)
+        hints = (ctypes.c_ulong * 5)(3, 1, 0, 0, 0)
+        x11.XChangeProperty(disp, xid, atom_motif, atom_motif, 32, 0, ctypes.byref(hints), 5)
+        x11.XFlush(disp)
+        x11.XCloseDisplay(disp)
+    except Exception as e:
+        print(f"Failed to set motif hints: {e}")
+
 class SpotifyMiniWindow(Gtk.Window):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -318,6 +334,8 @@ class SpotifyMiniWindow(Gtk.Window):
         self._switching_track = False
         self._switching_timer_id = None
         self._pending_target_uri = None
+        self._skip_target_idx = None
+        self._skip_debounce_id = None
         self._was_pinned_before_spotify = False
 
         # Queue Manager
@@ -415,6 +433,8 @@ class SpotifyMiniWindow(Gtk.Window):
         self.vol_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
         self.vol_scale.set_draw_value(False)
         self.vol_scale.add_css_class("vol-scale")
+        self.vol_scale.set_size_request(64, 16)
+        self.vol_scale.set_hexpand(False)
         self.vol_scale.set_value(70)
         self.vol_scale.set_tooltip_text(t("spotify_volume"))
         self.vol_scale.connect("change-value", self._on_volume_scale_change)
@@ -423,6 +443,9 @@ class SpotifyMiniWindow(Gtk.Window):
         vol_scroll = Gtk.EventControllerScroll.new(Gtk.EventControllerScrollFlags.VERTICAL)
         vol_scroll.connect("scroll", self._on_vol_box_scroll)
         vol_box.add_controller(vol_scroll)
+
+        vol_click = Gtk.GestureClick()
+        vol_box.add_controller(vol_click)
 
         left_box.append(vol_box)
         top_bar.append(left_box)
@@ -607,7 +630,7 @@ class SpotifyMiniWindow(Gtk.Window):
         queue_panel.add_css_class("queue-panel")
 
         # Queue panel header
-        q_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        q_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.queue_header_label = Gtk.Label(label=t("queue_title"))
         self.queue_header_label.add_css_class("queue-title")
         self.queue_header_label.set_hexpand(True)
@@ -616,6 +639,14 @@ class SpotifyMiniWindow(Gtk.Window):
         self.queue_header_label.set_ellipsize(Pango.EllipsizeMode.NONE)
         self.queue_header_label.set_wrap(False)
         q_header.append(self.queue_header_label)
+
+        # Queue header spinner indicator
+        self.queue_spinner = Gtk.Spinner()
+        self.queue_spinner.add_css_class("queue-header-spinner")
+        self.queue_spinner.set_size_request(16, 16)
+        self.queue_spinner.set_valign(Gtk.Align.CENTER)
+        self.queue_spinner.set_visible(False)
+        q_header.append(self.queue_spinner)
 
         self.q_close_btn = Gtk.Button.new_from_icon_name("pan-up-symbolic")
         self.q_close_btn.add_css_class("icon-btn")
@@ -648,31 +679,8 @@ class SpotifyMiniWindow(Gtk.Window):
         self.queue_list_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         self.queue_scroll.set_child(self.queue_list_box)
 
-        # Overlay to host queue scroll + loading spinner
-        self.queue_overlay = Gtk.Overlay()
-        self.queue_overlay.add_css_class("queue-overlay-container")
-        self.queue_overlay.set_child(self.queue_scroll)
-
-        # Loading / updating box
-        self.queue_loading_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        self.queue_loading_box.add_css_class("queue-loading-overlay")
-        self.queue_loading_box.set_valign(Gtk.Align.CENTER)
-        self.queue_loading_box.set_halign(Gtk.Align.CENTER)
-
-        self.queue_spinner = Gtk.Spinner()
-        self.queue_spinner.add_css_class("queue-loading-spinner")
-        self.queue_spinner.set_size_request(26, 26)
-        self.queue_loading_box.append(self.queue_spinner)
-
-        self.queue_loading_lbl = Gtk.Label(label=t("updating"))
-        self.queue_loading_lbl.add_css_class("queue-loading-label")
-        self.queue_loading_box.append(self.queue_loading_lbl)
-
-        self.queue_overlay.add_overlay(self.queue_loading_box)
-        self.queue_loading_box.set_visible(False)
+        queue_panel.append(self.queue_scroll)
         self._hide_loading_timer = None
-
-        queue_panel.append(self.queue_overlay)
 
         self.queue_revealer.set_child(queue_panel)
         self.player_card.append(self.queue_revealer)
@@ -696,6 +704,7 @@ class SpotifyMiniWindow(Gtk.Window):
 
     def _setup_events(self):
         self.connect("close-request", self._on_close_request)
+        self.connect("realize", self._on_realize)
 
         motion = Gtk.EventControllerMotion()
         motion.connect("enter", self._on_mouse_enter)
@@ -710,6 +719,20 @@ class SpotifyMiniWindow(Gtk.Window):
         key_ctrl.connect("key-pressed", self._on_key_pressed)
         self.add_controller(key_ctrl)
 
+    def _on_realize(self, widget):
+        surface = self.get_surface()
+        if isinstance(surface, GdkX11.X11Surface):
+            xid = surface.get_xid()
+            set_window_motif_hints(xid)
+        if surface and isinstance(surface, Gdk.Toplevel):
+            surface.connect("notify::state", self._on_surface_state_changed)
+
+    def _on_surface_state_changed(self, surface, pspec):
+        state = surface.get_state()
+        if state & Gdk.ToplevelState.MINIMIZED:
+            if self.is_pinned:
+                self.set_pinned(False)
+
     def _setup_timers(self):
         GLib.timeout_add(16, self._on_tick)
         GLib.timeout_add(200, self._on_fast_sync)
@@ -717,7 +740,7 @@ class SpotifyMiniWindow(Gtk.Window):
         GLib.timeout_add(4000, self._on_periodic_queue_check)
 
     def _on_periodic_queue_check(self):
-        if getattr(self, "_switching_track", False):
+        if getattr(self, "_switching_track", False) or getattr(self, "_skip_target_idx", None) is not None:
             return True
         if self.mpris.is_available:
             self.queue_mgr.check_for_updates()
@@ -744,6 +767,7 @@ class SpotifyMiniWindow(Gtk.Window):
         self.vol_scale.set_tooltip_text(vol_str)
 
     def _on_volume_scale_change(self, scale, scroll, value):
+        self.is_scrubbing = True
         val = value / 100.0
         self.current_volume = val
         self._update_volume_icon(val)
@@ -754,6 +778,7 @@ class SpotifyMiniWindow(Gtk.Window):
         def do_set_vol():
             self.mpris.set_volume(val)
             self.vol_debounce_id = None
+            GLib.timeout_add(150, self._clear_scrubbing)
             return False
 
         self.vol_debounce_id = GLib.timeout_add(40, do_set_vol)
@@ -856,7 +881,7 @@ class SpotifyMiniWindow(Gtk.Window):
             if not self.is_pinned and not self.is_hovered:
                 self._schedule_hide(3500)
 
-    def _set_switching_track(self, uri=None, duration_ms=1200):
+    def _set_switching_track(self, uri=None, duration_ms=3500):
         if getattr(self, "_switching_timer_id", None):
             try:
                 GLib.source_remove(self._switching_timer_id)
@@ -877,52 +902,69 @@ class SpotifyMiniWindow(Gtk.Window):
         self._switching_timer_id = GLib.timeout_add(duration_ms, _clear_switching)
 
     def on_user_next_clicked(self, *args):
-        self._set_switching_track(duration_ms=1200)
-
         all_tracks = self.queue_mgr.all_context_tracks
-        if all_tracks:
-            is_shuffle = getattr(self.mpris, "shuffle", False)
-            if is_shuffle:
+        if not all_tracks:
+            self._set_switching_track(duration_ms=3500)
+            self.mpris.next()
+            return
+
+        is_shuffle = getattr(self.mpris, "shuffle", False)
+        if is_shuffle:
+            if self._skip_target_idx is not None and 0 <= self._skip_target_idx < len(all_tracks):
+                curr_track = all_tracks[self._skip_target_idx]
+                curr_uri = curr_track.get("uri", "")
+            else:
                 curr_uri = self.mpris.track_id or (self.queue_mgr.current_track.get("uri") if self.queue_mgr.current_track else "")
-                curr_id = self.queue_mgr._extract_id(curr_uri)
+            curr_id = self.queue_mgr._extract_id(curr_uri)
 
-                if curr_uri:
-                    if not hasattr(self, "shuffle_history") or self.shuffle_history is None:
-                        self.shuffle_history = []
-                    if not self.shuffle_history or self.shuffle_history[-1] != curr_uri:
-                        self.shuffle_history.append(curr_uri)
-                        if len(self.shuffle_history) > 100:
-                            self.shuffle_history.pop(0)
+            if curr_uri:
+                if not hasattr(self, "shuffle_history") or self.shuffle_history is None:
+                    self.shuffle_history = []
+                if not self.shuffle_history or self.shuffle_history[-1] != curr_uri:
+                    self.shuffle_history.append(curr_uri)
+                    if len(self.shuffle_history) > 100:
+                        self.shuffle_history.pop(0)
 
-                played_ids = {self.queue_mgr._extract_id(u) for u in getattr(self, "shuffle_history", [])}
-                candidates = [t for t in all_tracks if self.queue_mgr._extract_id(t.get("uri")) != curr_id and self.queue_mgr._extract_id(t.get("uri")) not in played_ids]
+            played_ids = {self.queue_mgr._extract_id(u) for u in getattr(self, "shuffle_history", [])}
+            candidates = [t for t in all_tracks if self.queue_mgr._extract_id(t.get("uri")) != curr_id and self.queue_mgr._extract_id(t.get("uri")) not in played_ids]
 
-                if not candidates:
-                    candidates = [t for t in all_tracks if self.queue_mgr._extract_id(t.get("uri")) != curr_id]
-                    self.shuffle_history = [curr_uri] if curr_uri else []
+            if not candidates:
+                candidates = [t for t in all_tracks if self.queue_mgr._extract_id(t.get("uri")) != curr_id]
+                self.shuffle_history = [curr_uri] if curr_uri else []
 
-                if candidates:
-                    chosen = random.choice(candidates)
-                    self.play_track_silent(chosen.get("uri"))
-                    return
+            chosen = random.choice(candidates) if candidates else all_tracks[0]
+            target_idx = self.queue_mgr._find_track_idx(chosen.get("uri", ""), chosen.get("title", ""))
+            self._skip_target_idx = target_idx if target_idx >= 0 else 0
+            self.queue_mgr.last_valid_idx = self._skip_target_idx
+            target_track = chosen
+        else:
+            total = len(all_tracks)
+            if self._skip_target_idx is not None and 0 <= self._skip_target_idx < total:
+                base_idx = self._skip_target_idx
+            else:
+                matched_idx = self.queue_mgr._find_track_idx(self.mpris.track_id, self.mpris.title)
+                if matched_idx >= 0:
+                    base_idx = matched_idx
                 else:
-                    self.play_track_silent(all_tracks[0].get("uri"))
-                    return
+                    base_idx = getattr(self.queue_mgr, "last_valid_idx", 0)
+                if base_idx < 0 or base_idx >= total:
+                    base_idx = 0
 
             is_loop = getattr(self.mpris, "loop_status", "Playlist") != "None"
-            upcoming = self.queue_mgr.get_upcoming_tracks(limit=1, loop=is_loop)
-            if upcoming:
-                self.play_track_silent(upcoming[0].get("uri"))
-                return
+            if base_idx + 1 < total:
+                next_idx = base_idx + 1
             else:
-                self.play_track_silent(all_tracks[0].get("uri"))
-                return
+                next_idx = 0 if is_loop else base_idx
 
-        self.mpris.next()
+            self._skip_target_idx = next_idx
+            self.queue_mgr.last_valid_idx = next_idx
+            target_track = all_tracks[next_idx]
+
+        self._apply_immediate_skip_ui_and_debounce(target_track)
 
     def on_user_prev_clicked(self, *args):
         fresh_us = self.mpris.get_fresh_position()
-        if fresh_us > 3_000_000:
+        if fresh_us > 3_000_000 and self._skip_target_idx is None:
             self.mpris.set_position(0)
             self.anchor_pos = 0.0
             self.anchor_time = time.time()
@@ -930,47 +972,133 @@ class SpotifyMiniWindow(Gtk.Window):
             self.pos_label.set_text("00:00")
             return
 
-        self._set_switching_track(duration_ms=1200)
-
         all_tracks = self.queue_mgr.all_context_tracks
-        if all_tracks:
-            is_shuffle = getattr(self.mpris, "shuffle", False)
-            if is_shuffle:
-                if hasattr(self, "shuffle_history") and self.shuffle_history:
-                    curr_uri = self.mpris.track_id or (self.queue_mgr.current_track.get("uri") if self.queue_mgr.current_track else "")
-                    curr_id = self.queue_mgr._extract_id(curr_uri)
-                    while self.shuffle_history and self.queue_mgr._extract_id(self.shuffle_history[-1]) == curr_id:
-                        self.shuffle_history.pop()
+        if not all_tracks:
+            self._set_switching_track(duration_ms=3500)
+            self.mpris.previous()
+            return
 
-                    if self.shuffle_history:
-                        prev_uri = self.shuffle_history.pop()
-                        self.play_track_silent(prev_uri)
+        is_shuffle = getattr(self.mpris, "shuffle", False)
+        if is_shuffle:
+            if hasattr(self, "shuffle_history") and self.shuffle_history:
+                curr_uri = self.mpris.track_id or (self.queue_mgr.current_track.get("uri") if self.queue_mgr.current_track else "")
+                curr_id = self.queue_mgr._extract_id(curr_uri)
+                while self.shuffle_history and self.queue_mgr._extract_id(self.shuffle_history[-1]) == curr_id:
+                    self.shuffle_history.pop()
+
+                if self.shuffle_history:
+                    prev_uri = self.shuffle_history.pop()
+                    target_idx = self.queue_mgr._find_track_idx(prev_uri)
+                    if target_idx >= 0:
+                        self._skip_target_idx = target_idx
+                        self.queue_mgr.last_valid_idx = target_idx
+                        self._apply_immediate_skip_ui_and_debounce(all_tracks[target_idx])
                         return
 
-                past = self.queue_mgr.get_past_tracks(limit=10, loop=True)
-                if past:
-                    self.play_track_silent(past[-1].get("uri"))
-                    return
+            past = self.queue_mgr.get_past_tracks(limit=10, loop=True)
+            chosen = past[-1] if past else all_tracks[-1]
+            target_idx = self.queue_mgr._find_track_idx(chosen.get("uri", ""), chosen.get("title", ""))
+            self._skip_target_idx = target_idx if target_idx >= 0 else len(all_tracks) - 1
+            self.queue_mgr.last_valid_idx = self._skip_target_idx
+            target_track = chosen
+        else:
+            total = len(all_tracks)
+            if self._skip_target_idx is not None and 0 <= self._skip_target_idx < total:
+                base_idx = self._skip_target_idx
+            else:
+                matched_idx = self.queue_mgr._find_track_idx(self.mpris.track_id, self.mpris.title)
+                if matched_idx >= 0:
+                    base_idx = matched_idx
                 else:
-                    self.play_track_silent(all_tracks[-1].get("uri"))
-                    return
+                    base_idx = getattr(self.queue_mgr, "last_valid_idx", 0)
+                if base_idx < 0 or base_idx >= total:
+                    base_idx = 0
 
             is_loop = getattr(self.mpris, "loop_status", "Playlist") != "None"
-            past = self.queue_mgr.get_past_tracks(limit=10, loop=is_loop)
-            if past:
-                self.play_track_silent(past[-1].get("uri"))
-                return
+            if base_idx - 1 >= 0:
+                prev_idx = base_idx - 1
             else:
-                self.play_track_silent(all_tracks[-1].get("uri"))
-                return
+                prev_idx = (total - 1) if is_loop else 0
 
-        self.mpris.previous()
+            self._skip_target_idx = prev_idx
+            self.queue_mgr.last_valid_idx = prev_idx
+            target_track = all_tracks[prev_idx]
+
+        self._apply_immediate_skip_ui_and_debounce(target_track)
+
+    def _apply_immediate_skip_ui_and_debounce(self, target_track):
+        target_uri = target_track.get("uri", "")
+        self._set_switching_track(target_uri, duration_ms=3500)
+
+        # Immediately update local queue state and UI labels
+        self.queue_mgr.current_track = dict(target_track)
+        if self._skip_target_idx is not None:
+            self.queue_mgr.last_valid_idx = self._skip_target_idx
+            self.queue_mgr.current_track["track_num"] = self._skip_target_idx + 1
+        elif "track_num" not in self.queue_mgr.current_track or not self.queue_mgr.current_track.get("track_num"):
+            self.queue_mgr.current_track["track_num"] = getattr(self.queue_mgr, "last_valid_idx", 0) + 1
+
+        title = target_track.get("title") or t("track_default")
+        if title in ("Трек", "", None, "Track"):
+            tid = self.queue_mgr._extract_id(target_uri)
+            if tid and tid in self.queue_mgr.track_meta_cache:
+                meta = self.queue_mgr.track_meta_cache[tid]
+                if meta.get("title"):
+                    title = meta["title"]
+                    self.queue_mgr.current_track["title"] = title
+        self.title_label.set_text(title)
+        self.title_label.set_tooltip_text(title)
+
+        artist = (target_track.get("artist") or "").strip()
+        if not artist or artist.casefold() == "spotify":
+            tid = self.queue_mgr._extract_id(target_uri)
+            if tid and tid in self.queue_mgr.track_meta_cache:
+                meta = self.queue_mgr.track_meta_cache[tid]
+                if meta.get("artist") and meta["artist"].casefold() != "spotify":
+                    artist = meta["artist"]
+                    self.queue_mgr.current_track["artist"] = artist
+        if artist.casefold() == "spotify":
+            artist = ""
+        album = target_track.get("album") or ""
+        if album:
+            artist_text = f"{artist} • {album}" if artist else album
+        else:
+            artist_text = artist
+        self.artist_label.set_text(artist_text)
+        self.artist_label.set_tooltip_text(artist_text)
+
+        self.anchor_pos = 0.0
+        self.anchor_time = time.time()
+        self.scale.set_value(0)
+        self.pos_label.set_text("00:00")
+
+        # Show queue spinner when track is skipped (if queue is open)
+        if getattr(self, "is_queue_open", False):
+            self.show_queue_loading(duration_ms=1500)
+
+        # Smoothly update queue UI
+        self._rebuild_queue_ui(order_changed=False)
+
+        # Debounce the actual OpenUri call to Spotify by 300ms:
+        if getattr(self, "_skip_debounce_id", None):
+            try:
+                GLib.source_remove(self._skip_debounce_id)
+            except Exception:
+                pass
+            self._skip_debounce_id = None
+
+        def do_send_open_uri():
+            self._skip_debounce_id = None
+            self.play_track_silent(target_uri)
+            return False
+
+        self._skip_debounce_id = GLib.timeout_add(300, do_send_open_uri)
 
     def play_track_silent(self, uri):
         if not uri:
             return
 
-        self._set_switching_track(uri, duration_ms=1200)
+        self._set_switching_track(uri, duration_ms=3500)
 
         # Normalize URI format
         if uri.startswith("/com/spotify/track/"):
@@ -990,14 +1118,22 @@ class SpotifyMiniWindow(Gtk.Window):
             for idx, t in enumerate(self.queue_mgr.all_context_tracks):
                 if t.get("uri") == uri or self.queue_mgr._extract_id(t.get("uri")) == clean_tid:
                     self.queue_mgr.current_track = dict(t)
+                    self.queue_mgr.current_track["track_num"] = idx + 1
                     self.queue_mgr.last_valid_idx = idx
+                    self._skip_target_idx = idx
                     self._rebuild_queue_ui()
-                    if t.get("title"):
-                        self.title_label.set_text(t["title"])
-                        self.title_label.set_tooltip_text(t["title"])
-                    if t.get("artist"):
-                        self.artist_label.set_text(t["artist"])
-                        self.artist_label.set_tooltip_text(t["artist"])
+                    title = t.get("title")
+                    if title:
+                        self.title_label.set_text(title)
+                        self.title_label.set_tooltip_text(title)
+                    artist = (t.get("artist") or "").strip()
+                    if artist.casefold() == "spotify":
+                        artist = ""
+                    album = t.get("album") or ""
+                    artist_text = f"{artist} • {album}" if (artist and album) else (artist or album)
+                    if artist_text:
+                        self.artist_label.set_text(artist_text)
+                        self.artist_label.set_tooltip_text(artist_text)
                     self.anchor_pos = 0.0
                     self.anchor_time = time.time()
                     self.scale.set_value(0)
@@ -1085,50 +1221,72 @@ class SpotifyMiniWindow(Gtk.Window):
             GLib.timeout_add(120, _suppress)
             GLib.timeout_add(300, _restore_opacity)
 
-    def show_queue_loading(self, duration_ms=6000):
-        if not hasattr(self, "queue_loading_box") or not self.queue_loading_box:
+    def show_queue_loading(self, duration_ms=1500):
+        if not hasattr(self, "queue_spinner") or not self.queue_spinner:
             return
-        self.queue_loading_lbl.set_text(t("updating"))
+        self._queue_loading_shown_at = time.time()
+        self.queue_spinner.set_visible(True)
         self.queue_spinner.start()
-        self.queue_loading_box.set_visible(True)
         if getattr(self, "_hide_loading_timer", None):
-            GLib.source_remove(self._hide_loading_timer)
+            try:
+                GLib.source_remove(self._hide_loading_timer)
+            except Exception:
+                pass
             self._hide_loading_timer = None
 
         def _hide():
-            self.hide_queue_loading()
+            self.hide_queue_loading(force=True)
             return False
 
-        # Safety fallback only; spinner is normally hidden explicitly when UI unfreezes
+        # Safety fallback only; spinner is normally hidden explicitly when UI rebuild finishes
         self._hide_loading_timer = GLib.timeout_add(duration_ms, _hide)
 
-    def hide_queue_loading(self):
+    def hide_queue_loading(self, force=False):
+        if not force and hasattr(self, "_queue_loading_shown_at"):
+            elapsed = (time.time() - self._queue_loading_shown_at) * 1000
+            min_duration = 350
+            if elapsed < min_duration:
+                remaining = int(min_duration - elapsed)
+                GLib.timeout_add(remaining, lambda: self.hide_queue_loading(force=True) and False)
+                return
         if getattr(self, "_hide_loading_timer", None):
-            GLib.source_remove(self._hide_loading_timer)
+            try:
+                GLib.source_remove(self._hide_loading_timer)
+            except Exception:
+                pass
             self._hide_loading_timer = None
         if hasattr(self, "queue_spinner") and self.queue_spinner:
             self.queue_spinner.stop()
-        if hasattr(self, "queue_loading_box") and self.queue_loading_box:
-            self.queue_loading_box.set_visible(False)
+            self.queue_spinner.set_visible(False)
 
     def _rebuild_queue_ui(self, order_changed=False):
-        """Debounced entry point: coalesces rapid back-to-back calls into one rebuild.
-        Shows spinner + freezes list immediately, then fires real rebuild after 50ms."""
+        """Debounced entry point: coalesces rapid back-to-back calls into one rebuild."""
         self._rebuild_order_changed = getattr(self, "_rebuild_order_changed", False) or order_changed
+
+        if order_changed and getattr(self, "is_queue_open", False):
+            self.show_queue_loading(duration_ms=1500)
 
         # Cancel any previously scheduled rebuild
         if getattr(self, "_rebuild_pending_id", None):
-            GLib.source_remove(self._rebuild_pending_id)
+            try:
+                GLib.source_remove(self._rebuild_pending_id)
+            except Exception:
+                pass
             self._rebuild_pending_id = None
 
-        # Show spinner + freeze list right away so no partial state is visible and UI doesn't stutter
-        if getattr(self, "is_queue_open", False):
-            self.show_queue_loading(duration_ms=4000)
-            if hasattr(self, "queue_list_box") and self.queue_list_box:
-                self.queue_list_box.set_opacity(0.0)
+        # Schedule actual rebuild after 60ms (coalesces rapid clicks so UI stays responsive)
+        self._rebuild_pending_id = GLib.timeout_add(60, self._fire_rebuild)
 
-        # Schedule actual rebuild after 50ms (coalesces any further calls in that window)
-        self._rebuild_pending_id = GLib.timeout_add(50, self._fire_rebuild)
+    def _on_queue_track_clicked(self, uri):
+        if not uri:
+            return
+        if getattr(self, "is_queue_open", False):
+            self.show_queue_loading(duration_ms=1500)
+        idx = self.queue_mgr._find_track_idx(uri)
+        if idx >= 0:
+            self._skip_target_idx = idx
+            self.queue_mgr.last_valid_idx = idx
+        self.play_track_silent(uri)
 
     def _fire_rebuild(self):
         """Called by debounce timer — runs the actual rebuild with accumulated flags."""
@@ -1160,8 +1318,26 @@ class SpotifyMiniWindow(Gtk.Window):
         track_changed = bool(curr_uri and last_uri and curr_uri != last_uri)
         self._last_rebuilt_track_uri = curr_uri
 
-        curr_title = self.mpris.title or curr_track.get("title", t("no_track"))
-        curr_artist = (self.mpris.artist or curr_track.get("artist") or "").strip()
+        # CRITICAL: Prioritize curr_track metadata so rapid skipping updates title immediately
+        curr_title = curr_track.get("title")
+        if not curr_title or curr_title in ("Трек", "Track"):
+            tid = self.queue_mgr._extract_id(curr_uri)
+            if tid and tid in self.queue_mgr.track_meta_cache:
+                meta = self.queue_mgr.track_meta_cache[tid]
+                if meta.get("title"):
+                    curr_title = meta["title"]
+        if not curr_title or curr_title in ("Трек", "Track"):
+            curr_title = self.mpris.title or t("no_track")
+
+        curr_artist = (curr_track.get("artist") or "").strip()
+        if not curr_artist or curr_artist.casefold() == "spotify":
+            tid = self.queue_mgr._extract_id(curr_uri)
+            if tid and tid in self.queue_mgr.track_meta_cache:
+                meta = self.queue_mgr.track_meta_cache[tid]
+                if meta.get("artist") and meta["artist"].casefold() != "spotify":
+                    curr_artist = meta["artist"]
+        if not curr_artist or curr_artist.casefold() == "spotify":
+            curr_artist = (self.mpris.artist or "").strip()
         if curr_artist.casefold() == "spotify":
             curr_artist = ""
 
@@ -1232,7 +1408,7 @@ class SpotifyMiniWindow(Gtk.Window):
 
                 uri = track.get("uri", "")
                 click = Gtk.GestureClick()
-                click.connect("released", lambda g, n, x, y, u=uri: self.play_track_silent(u))
+                click.connect("released", lambda g, n, x, y, u=uri: self._on_queue_track_clicked(u))
                 row.add_controller(click)
 
                 self.queue_list_box.append(row)
@@ -1248,6 +1424,8 @@ class SpotifyMiniWindow(Gtk.Window):
         self.curr_row.add_css_class("queue-current-row")
 
         curr_num = curr_track.get("track_num")
+        if not curr_num and self._skip_target_idx is not None:
+            curr_num = self._skip_target_idx + 1
         num_lbl = Gtk.Label(label=f"{curr_num}" if curr_num else "")
         num_lbl.set_xalign(1.0)
         num_lbl.add_css_class("queue-num")
@@ -1344,19 +1522,23 @@ class SpotifyMiniWindow(Gtk.Window):
 
                 uri = track.get("uri", "")
                 click = Gtk.GestureClick()
-                click.connect("released", lambda g, n, x, y, u=uri: self.play_track_silent(u))
+                click.connect("released", lambda g, n, x, y, u=uri: self._on_queue_track_clicked(u))
                 row.add_controller(click)
 
                 self.queue_list_box.append(row)
 
         # Center scroll on current track if appropriate, otherwise preserve user's scroll position
+        # NEVER disturb user scroll position if they are hovering or scrolled the queue
+        user_interacting = getattr(self, "is_queue_hovered", False) or getattr(self, "_user_scrolled_queue", False)
         should_center = (
-            order_changed or 
-            track_changed or 
-            not getattr(self, "_user_scrolled_queue", False)
+            not user_interacting and (
+                order_changed or 
+                track_changed or 
+                not getattr(self, "_user_scrolled_queue", False)
+            )
         )
 
-        if should_center and not getattr(self, "is_queue_hovered", False):
+        if should_center:
             self._user_scrolled_queue = False
             GLib.idle_add(self._scroll_to_current_track)
             GLib.timeout_add(50, self._scroll_to_current_track)
@@ -1372,10 +1554,8 @@ class SpotifyMiniWindow(Gtk.Window):
                 GLib.idle_add(_restore_scroll)
                 GLib.timeout_add(50, _restore_scroll)
 
-        # Reveal the rebuilt list atomically and hide spinner at the exact same moment
+        # Cleanly hide spinner when queue list rebuild finishes
         def _show_list_and_hide_spinner():
-            if hasattr(self, "queue_list_box") and self.queue_list_box:
-                self.queue_list_box.set_opacity(1.0)
             self.hide_queue_loading()
             return False
         GLib.idle_add(_show_list_and_hide_spinner)
@@ -1416,6 +1596,18 @@ class SpotifyMiniWindow(Gtk.Window):
                         GLib.timeout_add(60, self._scroll_to_current_track)
                         GLib.timeout_add(180, self._scroll_to_current_track)
                         GLib.timeout_add(320, self._scroll_to_current_track)
+
+        # If mini player is minimized by window manager or system, unpin it
+        surface = self.get_surface()
+        if surface and isinstance(surface, Gdk.Toplevel):
+            if surface.get_state() & Gdk.ToplevelState.MINIMIZED:
+                if self.is_pinned:
+                    self.set_pinned(False)
+        if isinstance(surface, GdkX11.X11Surface):
+            my_xid = surface.get_xid()
+            if is_window_minimized(my_xid):
+                if self.is_pinned:
+                    self.set_pinned(False)
 
         # Track window position for saving when visible
         if self.get_visible():
@@ -1458,6 +1650,9 @@ class SpotifyMiniWindow(Gtk.Window):
             curr_uri = self.mpris.track_id or (self.queue_mgr.current_track.get("uri") if self.queue_mgr.current_track else "")
             self.shuffle_history = [curr_uri] if curr_uri else []
         self._update_playback_options_ui()
+        if getattr(self, "is_queue_open", False):
+            self.show_queue_loading(duration_ms=1500)
+        self._rebuild_queue_ui(order_changed=True)
 
     def _on_repeat_clicked(self, button=None):
         old_loop = getattr(self.mpris, "loop_status", "None")
@@ -1466,15 +1661,22 @@ class SpotifyMiniWindow(Gtk.Window):
         self._last_loop_status = new_loop
         self._update_playback_options_ui()
         if old_loop != new_loop:
+            if getattr(self, "is_queue_open", False):
+                self.show_queue_loading(duration_ms=1500)
             self._rebuild_queue_ui(order_changed=True)
             self._scroll_to_current_track()
 
     def _on_mpris_options_changed(self, shuffle, loop_status):
         old_loop = getattr(self, "_last_loop_status", None)
+        old_shuffle = getattr(self, "_last_shuffle_status", None)
         self._last_loop_status = loop_status
+        self._last_shuffle_status = shuffle
         GLib.idle_add(self._update_playback_options_ui)
-        if old_loop is not None and old_loop != loop_status:
+        mode_changed = (old_loop is not None and old_loop != loop_status) or (old_shuffle is not None and old_shuffle != shuffle)
+        if mode_changed:
             def _refresh():
+                if getattr(self, "is_queue_open", False):
+                    self.show_queue_loading(duration_ms=1500)
                 self._rebuild_queue_ui(order_changed=True)
                 self._scroll_to_current_track()
                 return False
@@ -1598,7 +1800,7 @@ class SpotifyMiniWindow(Gtk.Window):
         return True
 
     def _on_fast_sync(self):
-        if not self.mpris.is_available or self.is_scrubbing:
+        if not self.mpris.is_available or self.is_scrubbing or getattr(self, "_switching_track", False) or getattr(self, "_skip_target_idx", None) is not None:
             return True
 
         fresh_us = self.mpris.get_fresh_position()
@@ -1679,10 +1881,13 @@ class SpotifyMiniWindow(Gtk.Window):
         self._cancel_hide_timer()
         self.set_opacity(1.0)
         self.set_visible(True)
+        self.unminimize()
+        self.present()
 
         surface = self.get_surface()
         if isinstance(surface, GdkX11.X11Surface):
             xid = surface.get_xid()
+            set_window_motif_hints(xid)
             set_window_always_above(xid, True)
             if self.saved_x is not None and self.saved_y is not None:
                 move_window_to(xid, self.saved_x, self.saved_y)
@@ -1763,6 +1968,8 @@ class SpotifyMiniWindow(Gtk.Window):
         return False
 
     def _on_minimize_clicked(self, button=None):
+        if self.is_pinned:
+            self.set_pinned(False)
         self.minimize()
         self.hide_osd_immediate()
 
@@ -1779,8 +1986,10 @@ class SpotifyMiniWindow(Gtk.Window):
             self.close()
             sys.exit(0)
 
-    def _toggle_pin(self, button):
-        self.is_pinned = not self.is_pinned
+    def set_pinned(self, pinned: bool):
+        self.is_pinned = bool(pinned)
+        if not self.is_pinned:
+            self._was_pinned_before_spotify = False
         self._save_config()
         self._cancel_hide_timer()
         self._cancel_fade()
@@ -1789,7 +1998,7 @@ class SpotifyMiniWindow(Gtk.Window):
         surface = self.get_surface()
         if isinstance(surface, GdkX11.X11Surface):
             xid = surface.get_xid()
-            set_window_always_above(xid, True)
+            set_window_always_above(xid, self.is_pinned)
 
         if self.is_pinned:
             self.pin_btn.add_css_class("pinned-active")
@@ -1797,6 +2006,11 @@ class SpotifyMiniWindow(Gtk.Window):
         else:
             self.pin_btn.remove_css_class("pinned-active")
             self.pin_btn.set_tooltip_text(t("pin_off"))
+
+    def _toggle_pin(self, button=None):
+        new_state = not self.is_pinned
+        self.set_pinned(new_state)
+        if not new_state:
             self._schedule_hide(3500)
 
     def _launch_spotify(self, button):
@@ -1840,12 +2054,29 @@ class SpotifyMiniWindow(Gtk.Window):
             self.stack.set_visible_child_name("offline")
             return False
 
-        if getattr(self, "_switching_track", False) and getattr(self, "_pending_target_uri", None):
+        if getattr(self, "_skip_target_idx", None) is not None or (getattr(self, "_switching_track", False) and getattr(self, "_pending_target_uri", None)):
             incoming_tid = self.queue_mgr._extract_id(self.mpris.track_id)
-            target_tid = self.queue_mgr._extract_id(self._pending_target_uri)
+            target_tid = self.queue_mgr._extract_id(self._pending_target_uri) if getattr(self, "_pending_target_uri", None) else None
+            if not target_tid and getattr(self, "_skip_target_idx", None) is not None:
+                all_tracks = self.queue_mgr.all_context_tracks
+                if 0 <= self._skip_target_idx < len(all_tracks):
+                    target_tid = self.queue_mgr._extract_id(all_tracks[self._skip_target_idx].get("uri", ""))
+
+            # If user is still rapidly clicking (debounce timer active) or incoming track doesn't match target, ignore:
+            if getattr(self, "_skip_debounce_id", None) is not None:
+                return False
             if target_tid and incoming_tid != target_tid:
                 return False
+
             self._pending_target_uri = None
+            self._switching_track = False
+            self._skip_target_idx = None
+            if getattr(self, "_switching_timer_id", None):
+                try:
+                    GLib.source_remove(self._switching_timer_id)
+                except Exception:
+                    pass
+                self._switching_timer_id = None
 
         self.stack.set_visible_child_name("player")
         self.title_label.set_text(self.mpris.title)
@@ -1868,6 +2099,8 @@ class SpotifyMiniWindow(Gtk.Window):
         self.dur_label.set_text(format_time(self.duration_sec))
 
         if track_changed or self.mpris.track_id != self.last_track_id:
+            if getattr(self, "is_queue_open", False):
+                self.show_queue_loading(duration_ms=1500)
             self._user_scrolled_queue = False
             prev_duration = getattr(self, "curr_track_duration", 0.0)
             prev_pos = getattr(self, "last_sync_pos", 0.0)

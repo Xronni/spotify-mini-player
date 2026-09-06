@@ -108,6 +108,8 @@ class QueueManager:
                     # If active context was a playlist, refresh tracks and name from LevelDB in real time:
                     if self.context_uri and self.context_uri.startswith("spotify:playlist:"):
                         pid = self.context_uri.split(":")[-1]
+                        if self._last_sort_state:
+                            self._cached_sort_states[pid] = self._last_sort_state
                         ldb_name = self._get_playlist_name_from_ldb(pid)
                         if is_valid_name(ldb_name):
                             self.context_name = ldb_name
@@ -150,18 +152,25 @@ class QueueManager:
     def _find_track_idx(self, uri, title=""):
         if not self.all_context_tracks:
             return -1
+        ref_idx = getattr(self, "last_valid_idx", 0)
         curr_id = self._extract_id(uri)
         if curr_id:
-            for idx, t in enumerate(self.all_context_tracks):
-                if self._extract_id(t.get("uri", "")) == curr_id:
-                    return idx
+            matches = [idx for idx, t in enumerate(self.all_context_tracks) if self._extract_id(t.get("uri", "")) == curr_id]
+            if matches:
+                if len(matches) > 1:
+                    matches.sort(key=lambda i: abs(i - ref_idx))
+                return matches[0]
         if title:
             norm_title = title.strip().lower()
             if norm_title and norm_title not in ("трек", "нет трека", "track", "no track"):
+                matches = []
                 for idx, t in enumerate(self.all_context_tracks):
                     t_title = t.get("title", "").strip().lower()
                     if t_title and t_title not in ("трек", "track", "") and t_title == norm_title:
-                        return idx
+                        matches.append(idx)
+                if matches:
+                    matches.sort(key=lambda i: abs(i - ref_idx))
+                    return matches[0]
         return -1
 
     def get_past_tracks(self, limit=40, loop=True):
@@ -310,10 +319,15 @@ class QueueManager:
         sort_changed = False
         try:
             cur_sort = self._get_playlist_sort_state(pid)
-            if cur_sort != self._last_sort_state:
+            if cur_sort is not None and cur_sort != self._last_sort_state:
                 print(f"[QueueManager] Sort state changed for {pid}: {self._last_sort_state} -> {cur_sort}")
                 self._last_sort_state = cur_sort
                 sort_changed = True
+            elif cur_sort is None and self._last_sort_state is not None:
+                if pid in self._cached_sort_states and self._cached_sort_states[pid] is None:
+                    print(f"[QueueManager] Sort state cleared for {pid}: {self._last_sort_state} -> None")
+                    self._last_sort_state = None
+                    sort_changed = True
 
             ldb_name = self._get_playlist_name_from_ldb(pid)
             if is_valid_name(ldb_name) and ldb_name != self.context_name:
@@ -469,7 +483,7 @@ class QueueManager:
             fresh_idx = -1
             if fresh_tracks:
                 for idx, t in enumerate(fresh_tracks):
-                    if (curr_id and t["tid"] == curr_id) or (t.get("title", "").strip().lower() == norm_title):
+                    if (curr_id and t["tid"] == curr_id) or (not curr_id and t.get("title", "").strip().lower() == norm_title):
                         fresh_idx = idx
                         t["title"] = title
                         t["artist"] = artist
@@ -653,9 +667,11 @@ class QueueManager:
 
     def _get_playlist_sort_state(self, playlist_id):
         """Reads user's active sorting preference for playlist_id from Spotify's Browser Local Storage."""
+        if not playlist_id:
+            return None
         browser_dir = os.path.expanduser("~/.cache/spotify/Browser/Local Storage/leveldb")
         if not os.path.exists(browser_dir):
-            return None
+            return self._cached_sort_states.get(playlist_id, None)
 
         files = sorted(
             glob.glob(os.path.join(browser_dir, "*.log")) + glob.glob(os.path.join(browser_dir, "*.ldb")),
@@ -663,7 +679,7 @@ class QueueManager:
             reverse=True
         )
         if not files:
-            return None
+            return self._cached_sort_states.get(playlist_id, None)
 
         target = f"spotify:playlist:{playlist_id}"
         for fpath in files:
@@ -696,18 +712,18 @@ class QueueManager:
                     try:
                         chunk = d[brace_start:end].decode("utf-8", errors="ignore")
                         data = json.loads(chunk)
-                        if isinstance(data, dict):
-                            if target in data:
-                                val = data[target]
-                                if isinstance(val, dict) and val.get("field"):
-                                    return val
-                                return None
-                            if data == {}:
+                        if isinstance(data, dict) and target in data:
+                            val = data[target]
+                            if isinstance(val, dict) and val.get("field"):
+                                self._cached_sort_states[playlist_id] = val
+                                return val
+                            elif val is None or val == {}:
+                                self._cached_sort_states[playlist_id] = None
                                 return None
                     except Exception:
                         pass
 
-        return None
+        return self._cached_sort_states.get(playlist_id, None)
 
     def _extract_playlist_from_ldb(self, playlist_id):
         """Extracts all tracks directly from Spotify's LevelDB slice in real authentic sequence."""
@@ -919,10 +935,11 @@ class QueueManager:
                     c_idx = 0
 
             def is_incomplete(t):
-                no_title = t.get("title") in ("Трек", "", None)
+                no_title = t.get("title") in ("Трек", "", None, "Track")
                 no_artist = not t.get("artist") or t.get("artist").strip().casefold() == "spotify"
-                no_album = not t.get("album")
-                return no_title or no_artist or no_album
+                return no_title or no_artist
+
+            any_updated = False
 
             # 1. High-priority window: visible in queue (15 before, 45 after)
             start_i = max(0, c_idx - 15)
@@ -934,7 +951,7 @@ class QueueManager:
                 tid = self._extract_id(t.get("uri", ""))
                 cached = self._lookup_track_meta(tid)
                 if cached:
-                    if t.get("title") in ("Трек", "", None) and cached.get("title"):
+                    if t.get("title") in ("Трек", "", None, "Track") and cached.get("title"):
                         t["title"] = cached.get("title")
                     c_art = (cached.get("artist") or "").strip()
                     if (not t.get("artist") or t.get("artist") == "Spotify") and c_art and c_art != "Spotify":
@@ -945,7 +962,6 @@ class QueueManager:
                     missing_priority.append((i, tid))
 
             if missing_priority:
-                updated = False
                 for i, tid in missing_priority:
                     if getattr(self, "_rate_limited_until", 0) > time.time():
                         break
@@ -957,12 +973,8 @@ class QueueManager:
                             tracks[i]["artist"] = meta["artist"]
                         if meta.get("album"):
                             tracks[i]["album"] = meta["album"]
-                        updated = True
+                        any_updated = True
                     time.sleep(0.35)
-
-                if updated:
-                    self.save_cache()
-                    GLib.idle_add(lambda: self.notify(order_changed=False))
 
             # 2. Gentle background pass for the rest of the playlist
             remaining_missing = []
@@ -972,7 +984,7 @@ class QueueManager:
                     tid = self._extract_id(t.get("uri", ""))
                     cached = self._lookup_track_meta(tid)
                     if cached:
-                        if t.get("title") in ("Трек", "", None) and cached.get("title"):
+                        if t.get("title") in ("Трек", "", None, "Track") and cached.get("title"):
                             t["title"] = cached.get("title")
                         c_art = (cached.get("artist") or "").strip()
                         if (not t.get("artist") or t.get("artist") == "Spotify") and c_art and c_art != "Spotify":
@@ -983,7 +995,6 @@ class QueueManager:
                         remaining_missing.append((i, tid))
 
             if remaining_missing:
-                batch_updated = False
                 for i, tid in remaining_missing:
                     if getattr(self, "_rate_limited_until", 0) > time.time():
                         break
@@ -995,11 +1006,12 @@ class QueueManager:
                             tracks[i]["artist"] = meta["artist"]
                         if meta.get("album"):
                             tracks[i]["album"] = meta["album"]
-                        batch_updated = True
+                        any_updated = True
                     time.sleep(0.7)
-                if batch_updated:
-                    self.save_cache()
-                    GLib.idle_add(lambda: self.notify(order_changed=False))
+
+            if any_updated:
+                self.save_cache()
+                GLib.idle_add(lambda: self.notify(order_changed=False))
 
         t = threading.Thread(target=resolver, daemon=True)
         t.start()

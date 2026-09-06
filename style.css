@@ -28,10 +28,11 @@ window.mini-player-window {
 /* Volume Control in Top Bar (Next to visualizer) */
 .vol-box {
     margin-left: 6px;
-    padding: 1px 4px;
+    padding: 2px 6px;
     background-color: rgba(255, 255, 255, 0.05);
     border-radius: 9999px;
     border: 1px solid rgba(255, 255, 255, 0.08);
+    min-height: 24px;
 }
 
 .vol-btn {
@@ -50,19 +51,21 @@ window.mini-player-window {
 }
 
 scale.vol-scale {
-    min-width: 60px;
-    margin-right: 3px;
+    min-width: 64px;
+    min-height: 16px;
+    padding: 0;
+    margin: 0 4px 0 2px;
 }
 
 scale.vol-scale trough {
     background-color: rgba(255, 255, 255, 0.15);
     border-radius: 9999px;
-    min-height: 3px;
-    transition: min-height 100ms ease;
+    min-height: 4px;
 }
 
-scale.vol-scale:hover trough {
-    min-height: 5px;
+scale.vol-scale:hover trough,
+scale.vol-scale:active trough {
+    min-height: 4px;
 }
 
 scale.vol-scale highlight {
@@ -71,9 +74,9 @@ scale.vol-scale highlight {
 }
 
 scale.vol-scale slider {
-    min-width: 6px;
-    min-height: 6px;
-    margin: -1px;
+    min-width: 8px;
+    min-height: 8px;
+    margin: -2px;
     border-radius: 9999px;
     background-color: #ffffff;
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
@@ -81,10 +84,12 @@ scale.vol-scale slider {
     transition: opacity 100ms ease;
 }
 
-scale.vol-scale:hover slider {
+.vol-box:hover scale.vol-scale slider,
+scale.vol-scale:hover slider,
+scale.vol-scale:active slider {
     opacity: 1;
-    min-width: 7px;
-    min-height: 7px;
+    min-width: 8px;
+    min-height: 8px;
 }
 
 /* Mini Action Buttons */
@@ -298,26 +303,11 @@ scale.seek-bar:hover slider {
 }
 
 
-.queue-loading-overlay {
-    background-color: rgba(18, 18, 18, 0.82);
-    border-radius: 14px;
-    padding: 14px 22px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-    transition: opacity 150ms ease;
-}
-
-.queue-loading-spinner {
+.queue-header-spinner {
     color: #1ed760;
-    min-width: 26px;
-    min-height: 26px;
-}
-
-.queue-loading-label {
-    font-size: 11px;
-    font-weight: 600;
-    color: #e4e4e7;
-    letter-spacing: 0.3px;
+    min-width: 16px;
+    min-height: 16px;
+    margin-right: 6px;
 }
 
 .queue-scroll {
