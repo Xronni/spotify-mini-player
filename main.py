@@ -316,6 +316,8 @@ class SpotifyMiniWindow(Gtk.Window):
         self.vol_debounce_id = None
         self.shuffle_history = []
         self._switching_track = False
+        self._switching_timer_id = None
+        self._pending_target_uri = None
         self._was_pinned_before_spotify = False
 
         # Queue Manager
@@ -693,6 +695,8 @@ class SpotifyMiniWindow(Gtk.Window):
         self.stack.add_named(offline_box, "offline")
 
     def _setup_events(self):
+        self.connect("close-request", self._on_close_request)
+
         motion = Gtk.EventControllerMotion()
         motion.connect("enter", self._on_mouse_enter)
         motion.connect("leave", self._on_mouse_leave)
@@ -702,13 +706,19 @@ class SpotifyMiniWindow(Gtk.Window):
         scroll_ctrl.connect("scroll", self._on_scroll_volume)
         self.add_controller(scroll_ctrl)
 
+        key_ctrl = Gtk.EventControllerKey()
+        key_ctrl.connect("key-pressed", self._on_key_pressed)
+        self.add_controller(key_ctrl)
+
     def _setup_timers(self):
         GLib.timeout_add(16, self._on_tick)
         GLib.timeout_add(200, self._on_fast_sync)
         GLib.timeout_add(200, self._on_poll_window_state)
-        GLib.timeout_add(300, self._on_periodic_queue_check)
+        GLib.timeout_add(4000, self._on_periodic_queue_check)
 
     def _on_periodic_queue_check(self):
+        if getattr(self, "_switching_track", False):
+            return True
         if self.mpris.is_available:
             self.queue_mgr.check_for_updates()
         return True
@@ -846,48 +856,69 @@ class SpotifyMiniWindow(Gtk.Window):
             if not self.is_pinned and not self.is_hovered:
                 self._schedule_hide(3500)
 
-    def on_user_next_clicked(self, *args):
+    def _set_switching_track(self, uri=None, duration_ms=1200):
+        if getattr(self, "_switching_timer_id", None):
+            try:
+                GLib.source_remove(self._switching_timer_id)
+            except Exception:
+                pass
+            self._switching_timer_id = None
+
         self._switching_track = True
-        GLib.timeout_add(700, lambda: setattr(self, "_switching_track", False) or False)
+        if uri:
+            self._pending_target_uri = uri
 
-        is_shuffle = getattr(self.mpris, "shuffle", False)
+        def _clear_switching():
+            self._switching_track = False
+            self._pending_target_uri = None
+            self._switching_timer_id = None
+            return False
+
+        self._switching_timer_id = GLib.timeout_add(duration_ms, _clear_switching)
+
+    def on_user_next_clicked(self, *args):
+        self._set_switching_track(duration_ms=1200)
+
         all_tracks = self.queue_mgr.all_context_tracks
+        if all_tracks:
+            is_shuffle = getattr(self.mpris, "shuffle", False)
+            if is_shuffle:
+                curr_uri = self.mpris.track_id or (self.queue_mgr.current_track.get("uri") if self.queue_mgr.current_track else "")
+                curr_id = self.queue_mgr._extract_id(curr_uri)
 
-        if is_shuffle and all_tracks:
-            curr_uri = self.mpris.track_id or (self.queue_mgr.current_track.get("uri") if self.queue_mgr.current_track else "")
-            curr_id = self.queue_mgr._extract_id(curr_uri)
+                if curr_uri:
+                    if not hasattr(self, "shuffle_history") or self.shuffle_history is None:
+                        self.shuffle_history = []
+                    if not self.shuffle_history or self.shuffle_history[-1] != curr_uri:
+                        self.shuffle_history.append(curr_uri)
+                        if len(self.shuffle_history) > 100:
+                            self.shuffle_history.pop(0)
 
-            if curr_uri:
-                if not hasattr(self, "shuffle_history") or self.shuffle_history is None:
-                    self.shuffle_history = []
-                if not self.shuffle_history or self.shuffle_history[-1] != curr_uri:
-                    self.shuffle_history.append(curr_uri)
-                    if len(self.shuffle_history) > 100:
-                        self.shuffle_history.pop(0)
+                played_ids = {self.queue_mgr._extract_id(u) for u in getattr(self, "shuffle_history", [])}
+                candidates = [t for t in all_tracks if self.queue_mgr._extract_id(t.get("uri")) != curr_id and self.queue_mgr._extract_id(t.get("uri")) not in played_ids]
 
-            played_ids = {self.queue_mgr._extract_id(u) for u in getattr(self, "shuffle_history", [])}
-            candidates = [t for t in all_tracks if self.queue_mgr._extract_id(t.get("uri")) != curr_id and self.queue_mgr._extract_id(t.get("uri")) not in played_ids]
+                if not candidates:
+                    candidates = [t for t in all_tracks if self.queue_mgr._extract_id(t.get("uri")) != curr_id]
+                    self.shuffle_history = [curr_uri] if curr_uri else []
 
-            if not candidates:
-                candidates = [t for t in all_tracks if self.queue_mgr._extract_id(t.get("uri")) != curr_id]
-                self.shuffle_history = [curr_uri] if curr_uri else []
+                if candidates:
+                    chosen = random.choice(candidates)
+                    self.play_track_silent(chosen.get("uri"))
+                    return
+                else:
+                    self.play_track_silent(all_tracks[0].get("uri"))
+                    return
 
-            if candidates:
-                chosen = random.choice(candidates)
-                self.play_track_silent(chosen.get("uri"))
+            is_loop = getattr(self.mpris, "loop_status", "Playlist") != "None"
+            upcoming = self.queue_mgr.get_upcoming_tracks(limit=1, loop=is_loop)
+            if upcoming:
+                self.play_track_silent(upcoming[0].get("uri"))
                 return
             else:
-                self.mpris.next()
+                self.play_track_silent(all_tracks[0].get("uri"))
                 return
 
-        is_loop = getattr(self.mpris, "loop_status", "Playlist") != "None"
-        upcoming = self.queue_mgr.get_upcoming_tracks(limit=1, loop=is_loop)
-        if upcoming:
-            self.play_track_silent(upcoming[0].get("uri"))
-        elif getattr(self.mpris, "loop_status", "") == "Playlist" and all_tracks:
-            self.play_track_silent(all_tracks[0].get("uri"))
-        else:
-            self.mpris.next()
+        self.mpris.next()
 
     def on_user_prev_clicked(self, *args):
         fresh_us = self.mpris.get_fresh_position()
@@ -899,44 +930,47 @@ class SpotifyMiniWindow(Gtk.Window):
             self.pos_label.set_text("00:00")
             return
 
-        self._switching_track = True
-        GLib.timeout_add(700, lambda: setattr(self, "_switching_track", False) or False)
+        self._set_switching_track(duration_ms=1200)
 
-        is_shuffle = getattr(self.mpris, "shuffle", False)
         all_tracks = self.queue_mgr.all_context_tracks
-        is_loop = getattr(self.mpris, "loop_status", "Playlist") != "None"
+        if all_tracks:
+            is_shuffle = getattr(self.mpris, "shuffle", False)
+            if is_shuffle:
+                if hasattr(self, "shuffle_history") and self.shuffle_history:
+                    curr_uri = self.mpris.track_id or (self.queue_mgr.current_track.get("uri") if self.queue_mgr.current_track else "")
+                    curr_id = self.queue_mgr._extract_id(curr_uri)
+                    while self.shuffle_history and self.queue_mgr._extract_id(self.shuffle_history[-1]) == curr_id:
+                        self.shuffle_history.pop()
 
-        if is_shuffle:
-            if hasattr(self, "shuffle_history") and self.shuffle_history:
-                prev_uri = self.shuffle_history.pop()
-                curr_uri = self.mpris.track_id or (self.queue_mgr.current_track.get("uri") if self.queue_mgr.current_track else "")
-                if self.queue_mgr._extract_id(prev_uri) == self.queue_mgr._extract_id(curr_uri) and self.shuffle_history:
-                    prev_uri = self.shuffle_history.pop()
-                if prev_uri:
-                    self.play_track_silent(prev_uri)
+                    if self.shuffle_history:
+                        prev_uri = self.shuffle_history.pop()
+                        self.play_track_silent(prev_uri)
+                        return
+
+                past = self.queue_mgr.get_past_tracks(limit=10, loop=True)
+                if past:
+                    self.play_track_silent(past[-1].get("uri"))
+                    return
+                else:
+                    self.play_track_silent(all_tracks[-1].get("uri"))
                     return
 
+            is_loop = getattr(self.mpris, "loop_status", "Playlist") != "None"
             past = self.queue_mgr.get_past_tracks(limit=10, loop=is_loop)
             if past:
                 self.play_track_silent(past[-1].get("uri"))
+                return
             else:
-                self.mpris.previous()
-            return
+                self.play_track_silent(all_tracks[-1].get("uri"))
+                return
 
-        past = self.queue_mgr.get_past_tracks(limit=10, loop=is_loop)
-        if past:
-            self.play_track_silent(past[-1].get("uri"))
-        elif getattr(self.mpris, "loop_status", "") == "Playlist" and all_tracks:
-            self.play_track_silent(all_tracks[-1].get("uri"))
-        else:
-            self.mpris.previous()
+        self.mpris.previous()
 
     def play_track_silent(self, uri):
         if not uri:
             return
 
-        self._switching_track = True
-        GLib.timeout_add(700, lambda: setattr(self, "_switching_track", False) or False)
+        self._set_switching_track(uri, duration_ms=1200)
 
         # Normalize URI format
         if uri.startswith("/com/spotify/track/"):
@@ -952,10 +986,22 @@ class SpotifyMiniWindow(Gtk.Window):
 
         # Instantly update mini player current track if clicked from active context
         if self.queue_mgr.all_context_tracks:
-            for t in self.queue_mgr.all_context_tracks:
-                if t.get("uri") == uri:
+            clean_tid = self.queue_mgr._extract_id(uri)
+            for idx, t in enumerate(self.queue_mgr.all_context_tracks):
+                if t.get("uri") == uri or self.queue_mgr._extract_id(t.get("uri")) == clean_tid:
                     self.queue_mgr.current_track = dict(t)
+                    self.queue_mgr.last_valid_idx = idx
                     self._rebuild_queue_ui()
+                    if t.get("title"):
+                        self.title_label.set_text(t["title"])
+                        self.title_label.set_tooltip_text(t["title"])
+                    if t.get("artist"):
+                        self.artist_label.set_text(t["artist"])
+                        self.artist_label.set_tooltip_text(t["artist"])
+                    self.anchor_pos = 0.0
+                    self.anchor_time = time.time()
+                    self.scale.set_value(0)
+                    self.pos_label.set_text("00:00")
                     break
 
         active_win = get_active_window()
@@ -1075,9 +1121,9 @@ class SpotifyMiniWindow(Gtk.Window):
             GLib.source_remove(self._rebuild_pending_id)
             self._rebuild_pending_id = None
 
-        # Show spinner + freeze list right away so no partial state is visible
+        # Show spinner + freeze list right away so no partial state is visible and UI doesn't stutter
         if getattr(self, "is_queue_open", False):
-            self.show_queue_loading(duration_ms=6000)
+            self.show_queue_loading(duration_ms=4000)
             if hasattr(self, "queue_list_box") and self.queue_list_box:
                 self.queue_list_box.set_opacity(0.0)
 
@@ -1408,6 +1454,9 @@ class SpotifyMiniWindow(Gtk.Window):
 
     def _on_shuffle_clicked(self, button=None):
         self.mpris.toggle_shuffle()
+        if getattr(self.mpris, "shuffle", False):
+            curr_uri = self.mpris.track_id or (self.queue_mgr.current_track.get("uri") if self.queue_mgr.current_track else "")
+            self.shuffle_history = [curr_uri] if curr_uri else []
         self._update_playback_options_ui()
 
     def _on_repeat_clicked(self, button=None):
@@ -1563,10 +1612,33 @@ class SpotifyMiniWindow(Gtk.Window):
                 self.pos_label.set_text(format_time(fresh_sec))
                 self.show_osd(4500)
 
-                # Prevent single-track loop when played via open_uri if Repeat Track is not set
+                # Check if the EXACT SAME track looped on itself (single-track loop when played via open_uri)
                 loop = getattr(self.mpris, "loop_status", "None")
-                if loop != "Track" and self.duration_sec > 10.0 and self.last_sync_pos >= (self.duration_sec - 3.0):
-                    GLib.idle_add(self.on_user_next_clicked)
+                if not getattr(self, "_switching_track", False) and loop != "Track" and self.duration_sec > 10.0 and self.last_sync_pos >= (self.duration_sec - 3.5):
+                    # Check DBus track id to make sure this is actually a loop of the same track,
+                    # and NOT a new track where PropertiesChanged signal is on its way.
+                    fresh_track_id = self.mpris.get_fresh_track_id()
+
+                    if fresh_track_id and fresh_track_id == self.last_track_id and self.queue_mgr.all_context_tracks:
+                        # The track truly restarted at 0 without changing track ID!
+                        is_loop = (loop != "None")
+                        is_shuffle = getattr(self.mpris, "shuffle", False)
+                        if is_shuffle:
+                            curr_id = self.queue_mgr._extract_id(self.last_track_id)
+                            played_ids = {self.queue_mgr._extract_id(u) for u in getattr(self, "shuffle_history", [])}
+                            candidates = [t for t in self.queue_mgr.all_context_tracks if self.queue_mgr._extract_id(t.get("uri")) != curr_id and self.queue_mgr._extract_id(t.get("uri")) not in played_ids]
+                            if not candidates:
+                                candidates = [t for t in self.queue_mgr.all_context_tracks if self.queue_mgr._extract_id(t.get("uri")) != curr_id]
+                                self.shuffle_history = [self.last_track_id] if self.last_track_id else []
+                            if candidates:
+                                chosen = random.choice(candidates)
+                                GLib.idle_add(lambda u=chosen.get("uri"): self.play_track_silent(u))
+                        else:
+                            upcoming = self.queue_mgr.get_upcoming_tracks(limit=1, loop=is_loop)
+                            if upcoming:
+                                GLib.idle_add(lambda u=upcoming[0].get("uri"): self.play_track_silent(u))
+                            elif is_loop and self.queue_mgr.all_context_tracks:
+                                GLib.idle_add(lambda u=self.queue_mgr.all_context_tracks[0].get("uri"): self.play_track_silent(u))
             elif abs(fresh_sec - (self.anchor_pos + (time.time() - self.anchor_time))) > 1.2:
                 self.anchor_pos = fresh_sec
                 self.anchor_time = time.time()
@@ -1574,7 +1646,17 @@ class SpotifyMiniWindow(Gtk.Window):
             self.last_sync_pos = fresh_sec
         return True
 
-    def _on_user_media_action(self):
+    def _on_user_media_action(self, key=""):
+        key_str = str(key).strip().lower()
+        if key_str in ("next", "nexttrack"):
+            if self.queue_mgr.all_context_tracks:
+                self.on_user_next_clicked()
+                return
+        elif key_str in ("previous", "prev", "prevtrack"):
+            if self.queue_mgr.all_context_tracks:
+                self.on_user_prev_clicked()
+                return
+
         if is_spotify_active() or is_spotify_on_screen():
             return
 
@@ -1670,11 +1752,26 @@ class SpotifyMiniWindow(Gtk.Window):
         self._cancel_fade()
         self.set_visible(False)
 
+    def _on_key_pressed(self, controller, keyval, keycode, state):
+        if (state & Gdk.ModifierType.CONTROL_MASK) and (keyval in (Gdk.KEY_q, Gdk.KEY_Q)):
+            self._on_quit_app()
+            return True
+        return False
+
+    def _on_close_request(self, window):
+        self._on_quit_app()
+        return False
+
     def _on_minimize_clicked(self, button=None):
         self.minimize()
         self.hide_osd_immediate()
 
     def _on_close_clicked(self, button=None):
+        self._on_quit_app()
+
+    def _on_quit_app(self):
+        if hasattr(self, "queue_mgr") and self.queue_mgr:
+            self.queue_mgr.save_cache()
         app = self.get_application()
         if app:
             app.quit()
@@ -1743,6 +1840,13 @@ class SpotifyMiniWindow(Gtk.Window):
             self.stack.set_visible_child_name("offline")
             return False
 
+        if getattr(self, "_switching_track", False) and getattr(self, "_pending_target_uri", None):
+            incoming_tid = self.queue_mgr._extract_id(self.mpris.track_id)
+            target_tid = self.queue_mgr._extract_id(self._pending_target_uri)
+            if target_tid and incoming_tid != target_tid:
+                return False
+            self._pending_target_uri = None
+
         self.stack.set_visible_child_name("player")
         self.title_label.set_text(self.mpris.title)
         self.title_label.set_tooltip_text(self.mpris.title)
@@ -1767,6 +1871,10 @@ class SpotifyMiniWindow(Gtk.Window):
             self._user_scrolled_queue = False
             prev_duration = getattr(self, "curr_track_duration", 0.0)
             prev_pos = getattr(self, "last_sync_pos", 0.0)
+            approx_pos = min(prev_duration, getattr(self, "anchor_pos", 0.0) + (time.time() - getattr(self, "anchor_time", time.time())))
+            max_prev_pos = max(prev_pos, approx_pos)
+            old_track_id = self.last_track_id
+
             self.curr_track_duration = new_duration
             self.last_track_id = self.mpris.track_id
             self.anchor_pos = 0.0
@@ -1774,6 +1882,50 @@ class SpotifyMiniWindow(Gtk.Window):
             self.last_sync_pos = 0.0
             self.scale.set_value(0)
             self.pos_label.set_text("00:00")
+
+            # Check if previous track ended naturally (played to within 3.5s of its duration and not user-switched)
+            was_at_end = (not getattr(self, "_switching_track", False) and max_prev_pos > 2.0 and prev_duration > 5.0 and max_prev_pos >= max(1.0, prev_duration - 3.5))
+            loop = getattr(self.mpris, "loop_status", "None")
+
+            # If track finished naturally while Spotify is in background, and we have an active user playlist,
+            # check if Spotify switched to an off-playlist album/author track:
+            if was_at_end and not is_spotify_active() and not getattr(self, "_switching_track", False) and loop != "Track" and self.queue_mgr.all_context_tracks and self.queue_mgr.context_uri and self.queue_mgr.context_uri.startswith("spotify:playlist:"):
+                curr_match = self.queue_mgr._find_track_idx(self.mpris.track_id, self.mpris.title)
+                if curr_match == -1:
+                    # Incoming track is NOT in our playlist. Check if user intentionally clicked another playlist in Spotify:
+                    tid = self.queue_mgr._extract_id(self.mpris.track_id)
+                    new_pid = self.queue_mgr._find_playlist_for_track(tid) if tid else None
+                    cur_pid = self.queue_mgr.context_uri.split(":")[-1]
+                    if not new_pid or new_pid == cur_pid:
+                        # Spotify transitioned off-playlist to the song's album/author/radio!
+                        # Seamlessly advance to the NEXT track of OUR playlist:
+                        is_shuffle = getattr(self.mpris, "shuffle", False)
+                        if is_shuffle:
+                            curr_id = self.queue_mgr._extract_id(self.mpris.track_id)
+                            played_ids = {self.queue_mgr._extract_id(u) for u in getattr(self, "shuffle_history", [])}
+                            candidates = [t for t in self.queue_mgr.all_context_tracks if self.queue_mgr._extract_id(t.get("uri")) != curr_id and self.queue_mgr._extract_id(t.get("uri")) not in played_ids]
+                            if not candidates:
+                                candidates = [t for t in self.queue_mgr.all_context_tracks if self.queue_mgr._extract_id(t.get("uri")) != curr_id]
+                                self.shuffle_history = []
+                            if candidates:
+                                chosen = random.choice(candidates)
+                                self.play_track_silent(chosen.get("uri"))
+                                return False
+                        upcoming = self.queue_mgr.get_upcoming_tracks(limit=1, loop=(loop != "None"))
+                        if upcoming:
+                            self.play_track_silent(upcoming[0].get("uri"))
+                            return False
+                        elif self.queue_mgr.all_context_tracks:
+                            self.play_track_silent(self.queue_mgr.all_context_tracks[0].get("uri"))
+                            return False
+
+            if self.mpris.track_id:
+                if not hasattr(self, "shuffle_history") or self.shuffle_history is None:
+                    self.shuffle_history = []
+                if not self.shuffle_history or self.shuffle_history[-1] != self.mpris.track_id:
+                    self.shuffle_history.append(self.mpris.track_id)
+                    if len(self.shuffle_history) > 100:
+                        self.shuffle_history.pop(0)
 
             # Update current track in queue (notify inside will trigger debounced _rebuild_queue_ui)
             self.queue_mgr.update_current_track(self.mpris.title, self.mpris.artist, self.mpris.track_id, album=self.mpris.album)

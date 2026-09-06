@@ -35,6 +35,25 @@ def decode_varint(data, offset):
         shift += 7
     return res, idx
 
+def read_ldb_clean(fpath):
+    """Reads file, automatically removing 7-byte LevelDB WAL block headers every 32768 bytes for .log files."""
+    try:
+        with open(fpath, "rb") as fp:
+            raw = fp.read()
+    except Exception:
+        return b""
+    if not fpath.endswith(".log"):
+        return raw
+    BLOCK_SIZE = 32768
+    HEADER_SIZE = 7
+    if len(raw) <= BLOCK_SIZE:
+        return raw[HEADER_SIZE:] if len(raw) > HEADER_SIZE else raw
+    clean_blocks = []
+    for offset in range(0, len(raw), BLOCK_SIZE):
+        blk = raw[offset:offset + BLOCK_SIZE]
+        clean_blocks.append(blk[HEADER_SIZE:] if len(blk) > HEADER_SIZE else blk)
+    return b"".join(clean_blocks)
+
 class QueueManager:
     """Dynamically detects and syncs the REAL Spotify queue, playlist, or album in real time."""
     def __init__(self, on_queue_changed_cb=None):
@@ -60,20 +79,44 @@ class QueueManager:
         return self.track_meta_cache.get(tid)
 
     def load_cache(self):
-        """On every restart, only restore track_meta_cache (artist/album data).
-        Queue state (all_context_tracks, context, history) is always built fresh
-        from LevelDB — prevents stale ordering and playlist switching bugs."""
+        """Restores cached queue state, metadata, and active playlist context.
+        If a user playlist was active, attempts to re-extract fresh track order from LevelDB."""
         cache_file = os.path.join(CACHE_DIR, "queue_cache.json")
         if os.path.exists(cache_file):
             try:
                 with open(cache_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    # Only restore artist/metadata cache; queue state starts fresh
                     self.track_meta_cache = data.get("track_meta_cache", {})
                     # Clean any legacy bogus "Spotify" artist entries
                     for k, v in self.track_meta_cache.items():
                         if (v.get("artist") or "").strip().casefold() == "spotify":
                             v["artist"] = ""
+
+                    c_name = data.get("context_name", "")
+                    self.context_name = c_name if is_valid_name(c_name) else ""
+                    self.context_uri = data.get("context_uri", "")
+                    self.all_context_tracks = data.get("all_context_tracks", [])
+                    self.session_history = data.get("session_history", [])
+                    self.context_cache = data.get("context_cache", {})
+                    self.last_valid_idx = data.get("last_valid_idx", -1)
+                    self._last_sort_state = data.get("sort_state", None)
+
+                    for t in self.all_context_tracks:
+                        if (t.get("artist") or "").strip().casefold() == "spotify":
+                            t["artist"] = ""
+
+                    # If active context was a playlist, refresh tracks and name from LevelDB in real time:
+                    if self.context_uri and self.context_uri.startswith("spotify:playlist:"):
+                        pid = self.context_uri.split(":")[-1]
+                        ldb_name = self._get_playlist_name_from_ldb(pid)
+                        if is_valid_name(ldb_name):
+                            self.context_name = ldb_name
+                        active_sort = self._get_playlist_sort_state(pid)
+                        if active_sort is not None:
+                            self._last_sort_state = active_sort
+                        fresh_tracks = self._extract_playlist_from_ldb(pid)
+                        if fresh_tracks:
+                            self.all_context_tracks = fresh_tracks
             except Exception as e:
                 print(f"Error loading queue cache: {e}")
 
@@ -88,7 +131,8 @@ class QueueManager:
                 "session_history": self.session_history,
                 "context_cache": self.context_cache,
                 "track_meta_cache": self.track_meta_cache,
-                "sort_state": self._last_sort_state
+                "sort_state": self._last_sort_state,
+                "last_valid_idx": getattr(self, "last_valid_idx", -1)
             }
             with open(cache_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -122,11 +166,13 @@ class QueueManager:
 
     def get_past_tracks(self, limit=40, loop=True):
         """Returns tracks that come BEFORE the current track in this playlist, wrapping if loop=True."""
-        if self.all_context_tracks and self.current_track:
-            curr_idx = self._find_track_idx(
-                self.current_track.get("uri", ""),
-                self.current_track.get("title", "")
-            )
+        if self.all_context_tracks:
+            curr_idx = -1
+            if self.current_track:
+                curr_idx = self._find_track_idx(
+                    self.current_track.get("uri", ""),
+                    self.current_track.get("title", "")
+                )
             if curr_idx < 0:
                 curr_idx = getattr(self, "last_valid_idx", -1)
 
@@ -151,11 +197,13 @@ class QueueManager:
 
     def get_upcoming_tracks(self, limit=60, loop=True):
         """Returns upcoming tracks in the current playlist in order, wrapping if loop=True."""
-        if self.all_context_tracks and self.current_track:
-            curr_idx = self._find_track_idx(
-                self.current_track.get("uri", ""),
-                self.current_track.get("title", "")
-            )
+        if self.all_context_tracks:
+            curr_idx = -1
+            if self.current_track:
+                curr_idx = self._find_track_idx(
+                    self.current_track.get("uri", ""),
+                    self.current_track.get("title", "")
+                )
             if curr_idx < 0:
                 curr_idx = getattr(self, "last_valid_idx", -1)
 
@@ -175,6 +223,8 @@ class QueueManager:
                 if l_idx + 1 < len(self.all_context_tracks):
                     end_i = l_idx + 1 + limit if limit else len(self.all_context_tracks)
                     return self.all_context_tracks[l_idx + 1:end_i]
+                elif self.all_context_tracks:
+                    return self.all_context_tracks[:limit] if limit else self.all_context_tracks
         return []
 
     def _get_playlist_name_from_ldb(self, playlist_id):
@@ -187,8 +237,7 @@ class QueueManager:
         ldb_files = sorted([f for f in files if f.endswith(".ldb")], key=os.path.getmtime, reverse=True)
         for fpath in log_files + ldb_files:
             try:
-                with open(fpath, "rb") as fp:
-                    d = fp.read()
+                d = read_ldb_clean(fpath)
                 pos = len(d)
                 while True:
                     idx = d.rfind(target, 0, pos)
@@ -208,10 +257,7 @@ class QueueManager:
         return ""
 
     def get_context_name(self, current_album=""):
-        if is_valid_name(self.context_name):
-            return self.context_name
-
-        # 1. From context_uri if playlist
+        # 1. From context_uri if playlist - ALWAYS check real playlist name in LevelDB first!
         if self.context_uri and self.context_uri.startswith("spotify:playlist:"):
             pid = self.context_uri.split(":")[-1]
             ldb_name = self._get_playlist_name_from_ldb(pid)
@@ -223,6 +269,9 @@ class QueueManager:
                 if is_valid_name(c_name):
                     self.context_name = c_name
                     return self.context_name
+
+        if is_valid_name(self.context_name) and not (self.context_uri and self.context_uri.startswith("spotify:playlist:") and self.context_name == current_album):
+            return self.context_name
 
         # 2. Try detecting active context from restore state or LevelDB
         detected = self._detect_active_context_uri()
@@ -240,73 +289,76 @@ class QueueManager:
                     self.context_uri = detected
                     return self.context_name
 
-        # 3. Fallback to current album if playing an album
-        if current_album and is_valid_name(current_album):
-            return current_album
+        # 3. Fallback to current album if playing an album (never if playing a playlist)
+        if not (self.context_uri and self.context_uri.startswith("spotify:playlist:")):
+            if current_album and is_valid_name(current_album):
+                return current_album
 
-        return ""
+        return self.context_name or ""
 
     def check_for_updates(self):
         """Checks if active playlist or sort order was modified in Spotify LevelDB and refreshes if needed."""
         if not self.context_uri or not self.context_uri.startswith("spotify:playlist:"):
             return
         pid = self.context_uri.split(":")[-1]
-        log_files = glob.glob(os.path.expanduser("~/.cache/spotify/Users/*-user/primary.ldb/*.log")) + \
-                    glob.glob(os.path.expanduser("~/.cache/spotify/Users/*-user/primary.ldb/*.ldb"))
-        browser_files = glob.glob(os.path.expanduser("~/.cache/spotify/Browser/Local Storage/leveldb/*.log")) + \
-                        glob.glob(os.path.expanduser("~/.cache/spotify/Browser/Local Storage/leveldb/*.ldb"))
 
-        needs_refresh = False
+        now = time.time()
+        if now - getattr(self, "_last_update_check_time", 0) < 3.0:
+            return
+        self._last_update_check_time = now
+
         sort_changed = False
         try:
-            if log_files:
-                latest_ldb_mtime = max(os.path.getmtime(f) for f in log_files)
-                if latest_ldb_mtime > self._last_ldb_mtime:
-                    self._last_ldb_mtime = latest_ldb_mtime
-                    needs_refresh = True
-
             cur_sort = self._get_playlist_sort_state(pid)
             if cur_sort != self._last_sort_state:
                 print(f"[QueueManager] Sort state changed for {pid}: {self._last_sort_state} -> {cur_sort}")
                 self._last_sort_state = cur_sort
-                needs_refresh = True
                 sort_changed = True
 
-            if needs_refresh:
+            ldb_name = self._get_playlist_name_from_ldb(pid)
+            if is_valid_name(ldb_name) and ldb_name != self.context_name:
+                self.context_name = ldb_name
+
+            # If sort changed or all_context_tracks is empty, reload tracks
+            if sort_changed or not self.all_context_tracks:
                 fresh_tracks = self._extract_playlist_from_ldb(pid)
                 if fresh_tracks:
-                    # Compare track sequence to avoid phantom UI refreshes during normal playback
-                    old_tids = [t.get("tid") for t in self.all_context_tracks]
-                    new_tids = [t.get("tid") for t in fresh_tracks]
-                    if not sort_changed and old_tids == new_tids:
-                        # Tracks and order did not change at all. Quietly update metadata in place:
-                        with self._lock:
-                            for i, t in enumerate(self.all_context_tracks):
-                                ft = fresh_tracks[i]
-                                if not t.get("title") or t.get("title") in ("Трек", "Track"):
-                                    t["title"] = ft.get("title", t.get("title"))
-                                if not t.get("artist") or t.get("artist") == "Spotify":
-                                    t["artist"] = ft.get("artist", t.get("artist"))
-                        return
+                    self._apply_fresh_tracks(fresh_tracks, order_changed=True)
+                return
 
-                    for t in fresh_tracks:
-                        tid = t.get("tid")
-                        cached = self._lookup_track_meta(tid)
-                        if cached:
-                            t["title"] = cached.get("title", t.get("title"))
-                            t["artist"] = cached.get("artist", t.get("artist"))
-                            t["album"] = cached.get("album", t.get("album", ""))
-                            t["duration"] = cached.get("duration", t.get("duration", 0))
-                    with self._lock:
-                        self.all_context_tracks = fresh_tracks
-                        if self.current_track:
-                            new_idx = self._find_track_idx(self.current_track.get("uri", ""), self.current_track.get("title", ""))
-                            if new_idx >= 0:
-                                self.current_track["track_num"] = new_idx + 1
-                                self.last_valid_idx = new_idx
-                    self.notify(order_changed=True)
+            # Check if tracks were added/removed in Spotify
+            log_files = glob.glob(os.path.expanduser("~/.cache/spotify/Users/*-user/primary.ldb/*.log")) + \
+                        glob.glob(os.path.expanduser("~/.cache/spotify/Users/*-user/primary.ldb/*.ldb"))
+            if log_files:
+                latest_ldb_mtime = max(os.path.getmtime(f) for f in log_files)
+                if latest_ldb_mtime > self._last_ldb_mtime:
+                    self._last_ldb_mtime = latest_ldb_mtime
+                    fresh_tracks = self._extract_playlist_from_ldb(pid)
+                    if fresh_tracks:
+                        old_tids = [t.get("tid") for t in self.all_context_tracks]
+                        new_tids = [t.get("tid") for t in fresh_tracks]
+                        if old_tids != new_tids and abs(len(fresh_tracks) - len(self.all_context_tracks)) > 0:
+                            self._apply_fresh_tracks(fresh_tracks, order_changed=True)
         except Exception as e:
             print(f"Error checking for playlist updates: {e}")
+
+    def _apply_fresh_tracks(self, fresh_tracks, order_changed=True):
+        for t in fresh_tracks:
+            tid = t.get("tid")
+            cached = self._lookup_track_meta(tid)
+            if cached:
+                t["title"] = cached.get("title", t.get("title"))
+                t["artist"] = cached.get("artist", t.get("artist"))
+                t["album"] = cached.get("album", t.get("album", ""))
+                t["duration"] = cached.get("duration", t.get("duration", 0))
+        with self._lock:
+            self.all_context_tracks = fresh_tracks
+            if self.current_track:
+                new_idx = self._find_track_idx(self.current_track.get("uri", ""), self.current_track.get("title", ""))
+                if new_idx >= 0:
+                    self.current_track["track_num"] = new_idx + 1
+                    self.last_valid_idx = new_idx
+        self.notify(order_changed=order_changed)
 
     def _find_playlist_for_track(self, track_id):
         """Quickly scans local LevelDB to find which USER playlist slice contains track_id."""
@@ -320,8 +372,7 @@ class QueueManager:
         track_bytes = track_id.encode()
         for fpath in all_files:
             try:
-                with open(fpath, "rb") as fp:
-                    d = fp.read()
+                d = read_ldb_clean(fpath)
                 if track_bytes not in d:
                     continue
                 for m in re.finditer(rb"1!pl#slc#\x27spotify:playlist:([a-zA-Z0-9]{22})#", d):
@@ -532,7 +583,7 @@ class QueueManager:
                             }
                         self.notify(order_changed=True)
                         return
-            elif detected_ctx.startswith("spotify:album:"):
+            elif detected_ctx.startswith("spotify:album:") and not self.all_context_tracks:
                 name, emb_tracks = self._fetch_embed_tracks(detected_ctx)
                 if emb_tracks:
                     fresh_idx = -1
@@ -555,8 +606,8 @@ class QueueManager:
                     self.notify(order_changed=True)
                     return
 
-        # Case D: Try fetching album tracks for track
-        if curr_id and is_valid_name(album):
+        # Case D: Try fetching album tracks for track (only when no active playlist is loaded)
+        if not self.all_context_tracks and curr_id and is_valid_name(album):
             name, emb_tracks = self._fetch_album_for_track(curr_id)
             if emb_tracks:
                 fresh_idx = -1
@@ -579,13 +630,21 @@ class QueueManager:
                 self.notify(order_changed=True)
                 return
 
-        # Case E: Standalone single track fallback
+        # Case E: Standalone single track fallback (preserve existing playlist if present)
         with self._lock:
-            self.current_track = {"title": title, "artist": artist, "uri": uri, "track_num": 1}
-            if not is_valid_name(self.context_name) and is_valid_name(album):
+            track_num = (self.last_valid_idx + 1) if getattr(self, "last_valid_idx", -1) >= 0 else 1
+            self.current_track = {
+                "title": title,
+                "artist": artist,
+                "uri": uri,
+                "album": album,
+                "track_num": track_num
+            }
+            if not self.all_context_tracks and not is_valid_name(self.context_name) and is_valid_name(album):
                 self.context_name = album
         self.notify()
-        self._sync_context_async(curr_id, title, artist, album)
+        if not self.all_context_tracks:
+            self._sync_context_async(curr_id, title, artist, album)
 
     def _extract_id(self, uri):
         if not uri:
@@ -658,8 +717,7 @@ class QueueManager:
         found_chunk = None
         for fpath in sorted(files, key=os.path.getmtime, reverse=True):
             if fpath.endswith(".log") or fpath.endswith(".ldb"):
-                with open(fpath, "rb") as fp:
-                    d = fp.read()
+                d = read_ldb_clean(fpath)
                 matches = list(re.finditer(re.escape(target), d))
                 if matches:
                     pos = matches[-1].start()

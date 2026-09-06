@@ -148,8 +148,17 @@ class MPRISManager:
                     self.on_avail_cb(False)
 
     def _on_media_key_pressed(self, conn, sender, path, iface, signal, params, user_data):
+        key = ""
+        try:
+            unpacked = params.unpack()
+            if len(unpacked) >= 2:
+                key = str(unpacked[1])
+            elif len(unpacked) == 1:
+                key = str(unpacked[0])
+        except Exception:
+            pass
         if self.on_media_key_cb:
-            GLib.idle_add(self.on_media_key_cb)
+            GLib.idle_add(lambda k=key: self.on_media_key_cb(k))
 
     def _on_seeked(self, conn, sender, path, iface, signal, params, user_data):
         if self.on_media_key_cb:
@@ -291,6 +300,22 @@ class MPRISManager:
         except Exception:
             return 0
 
+    def get_fresh_track_id(self):
+        """Fetches uncached live mpris:trackid directly from D-Bus."""
+        if not self.props_proxy or not self.is_available:
+            return self.track_id
+        try:
+            meta = self.props_proxy.call_sync(
+                "Get",
+                GLib.Variant("(ss)", (PLAYER_INTERFACE, "Metadata")),
+                Gio.DBusCallFlags.NONE,
+                -1,
+                None
+            ).unpack()[0]
+            return meta.get("mpris:trackid", self.track_id)
+        except Exception:
+            return self.track_id
+
     def play_pause(self):
         if self.player_proxy:
             try:
@@ -333,6 +358,14 @@ class MPRISManager:
             except Exception as e:
                 print(f"OpenUri failed: {e}")
 
+    def load_context_uri(self, uri):
+        """Tells Spotify to load the specified context URI (e.g. spotify:playlist:...)."""
+        if self.player_proxy and uri:
+            try:
+                self.player_proxy.call_sync("LoadContextUri", GLib.Variant("(s)", (uri,)), Gio.DBusCallFlags.NONE, -1, None)
+            except Exception:
+                pass
+
     def get_volume(self):
         if self.props_proxy:
             try:
@@ -369,27 +402,27 @@ class MPRISManager:
                 print(f"Raise failed: {e}")
 
     def toggle_shuffle(self):
+        new_val = not self.shuffle
         if self.props_proxy:
             try:
-                new_val = not self.shuffle
                 params = GLib.Variant("(ssv)", (PLAYER_INTERFACE, "Shuffle", GLib.Variant("b", new_val)))
                 self.props_proxy.call_sync("Set", params, Gio.DBusCallFlags.NONE, -1, None)
-                self.shuffle = new_val
-                if self.on_options_cb:
-                    self.on_options_cb(self.shuffle, self.loop_status)
             except Exception as e:
                 print(f"toggle_shuffle failed: {e}")
+        self.shuffle = new_val
+        if self.on_options_cb:
+            self.on_options_cb(self.shuffle, self.loop_status)
 
     def cycle_loop_status(self):
+        modes = ["None", "Playlist", "Track"]
+        curr = self.loop_status if self.loop_status in modes else "None"
+        next_mode = modes[(modes.index(curr) + 1) % len(modes)]
         if self.props_proxy:
             try:
-                modes = ["None", "Playlist", "Track"]
-                curr = self.loop_status if self.loop_status in modes else "None"
-                next_mode = modes[(modes.index(curr) + 1) % len(modes)]
                 params = GLib.Variant("(ssv)", (PLAYER_INTERFACE, "LoopStatus", GLib.Variant("s", next_mode)))
                 self.props_proxy.call_sync("Set", params, Gio.DBusCallFlags.NONE, -1, None)
-                self.loop_status = next_mode
-                if self.on_options_cb:
-                    self.on_options_cb(self.shuffle, self.loop_status)
             except Exception as e:
                 print(f"cycle_loop_status failed: {e}")
+        self.loop_status = next_mode
+        if self.on_options_cb:
+            self.on_options_cb(self.shuffle, self.loop_status)
