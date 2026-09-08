@@ -1,0 +1,70 @@
+name: 🐛 Bug Report
+description: Report a bug or playback/queue sync issue in Spotify Mini Player
+title: "[BUG]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! Please fill out the information below to help us investigate.
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is.
+      placeholder: Describe the issue (e.g. queue not updating, OSD not fading, volume slider jump)...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Steps to reproduce the behavior.
+      placeholder: |
+        1. Open Spotify Desktop
+        2. Launch Spotify Mini Player with ./run.sh
+        3. Click on ...
+        4. See error ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: A clear description of what you expected to happen.
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System / Linux Distribution
+      options:
+        - Ubuntu 24.04 / 22.04 LTS
+        - Debian 12 (Bookworm)
+        - Arch Linux / Manjaro
+        - Fedora 40 / 39
+        - Other Linux
+    validations:
+      required: true
+  - type: input
+    id: spotify_version
+    attributes:
+      label: Spotify Version & Installation Source
+      placeholder: e.g. Spotify deb (apt), Snap, or Flatpak
+    validations:
+      required: false
+  - type: input
+    id: desktop_env
+    attributes:
+      label: Desktop Environment / Window Manager
+      placeholder: GNOME 46 (Wayland / X11) / KDE Plasma 6 / Hyprland
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Terminal Output / Error Logs
+      description: Run `./run.sh` in terminal and paste any console logs.
+      render: shell
+    validations:
+      required: false
