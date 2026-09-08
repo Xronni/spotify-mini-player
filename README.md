@@ -52,8 +52,15 @@
   sudo apt install python3 python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 libx11-6
   ```
 
-#### Quick Start:
-1. Clone the repository:
+#### Option A: Install Debian / Ubuntu Package (.deb) — Recommended
+Download `spotify-mini-player_1.0.0_all.deb` from the [Releases page](https://github.com/Xronni/spotify-mini-player/releases/latest) and install:
+```bash
+sudo dpkg -i spotify-mini-player_1.0.0_all.deb
+sudo apt install -f  # automatically install dependencies if needed
+```
+
+#### Option B: Standalone Archive or Git Clone
+1. Clone the repository or download `spotify-mini-player-v1.0.0-linux-x86_64.tar.gz`:
    ```bash
    git clone https://github.com/Xronni/spotify-mini-player.git
    cd spotify-mini-player
@@ -117,8 +124,15 @@
   sudo apt install python3 python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 libx11-6
   ```
 
-#### Запуск:
-1. Клонируйте репозиторий:
+#### Вариант А: Установка пакета Debian / Ubuntu (.deb) — Рекомендуется
+Скачайте `spotify-mini-player_1.0.0_all.deb` со страницы [Релизов](https://github.com/Xronni/spotify-mini-player/releases/latest) и выполните:
+```bash
+sudo dpkg -i spotify-mini-player_1.0.0_all.deb
+sudo apt install -f  # автоматическая установка зависимостей при необходимости
+```
+
+#### Вариант Б: Портативный запуск или сборка из Git
+1. Клонируйте репозиторий или скачайте архив `spotify-mini-player-v1.0.0-linux-x86_64.tar.gz`:
    ```bash
    git clone https://github.com/Xronni/spotify-mini-player.git
    cd spotify-mini-player
