@@ -979,10 +979,7 @@ class SpotifyMiniWindow(Gtk.Window):
             self.last_sync_pos = 0.0
             self.scale.set_value(0)
             self.pos_label.set_text("00:00")
-            if all_tracks and all_tracks[0].get("uri"):
-                self.play_track_silent(all_tracks[0].get("uri"))
-            else:
-                self.mpris.next()
+            self.mpris.next()
             self.show_osd(4500, force=True)
             return
 
@@ -1062,10 +1059,7 @@ class SpotifyMiniWindow(Gtk.Window):
             self.last_sync_pos = 0.0
             self.scale.set_value(0)
             self.pos_label.set_text("00:00")
-            if all_tracks and all_tracks[0].get("uri"):
-                self.play_track_silent(all_tracks[0].get("uri"))
-            else:
-                self.mpris.previous()
+            self.mpris.previous()
             self.show_osd(4500, force=True)
             return
 
@@ -2229,41 +2223,6 @@ class SpotifyMiniWindow(Gtk.Window):
             self.scale.set_value(0)
             self.pos_label.set_text("00:00")
 
-            # Check if previous track ended naturally (played to within 3.5s of its duration and not user-switched)
-            was_at_end = (not getattr(self, "_switching_track", False) and max_prev_pos > 2.0 and prev_duration > 5.0 and max_prev_pos >= max(1.0, prev_duration - 3.5))
-            loop = getattr(self.mpris, "loop_status", "None")
-
-            # If track finished naturally while Spotify is in background, and we have an active user playlist,
-            # check if Spotify switched to an off-playlist album/author track:
-            if was_at_end and not is_spotify_active() and not getattr(self, "_switching_track", False) and loop != "Track" and self.queue_mgr.all_context_tracks and self.queue_mgr.context_uri and self.queue_mgr.context_uri.startswith("spotify:playlist:"):
-                curr_match = self.queue_mgr._find_track_idx(self.mpris.track_id, self.mpris.title)
-                if curr_match == -1:
-                    # Incoming track is NOT in our playlist. Check if user intentionally clicked another playlist in Spotify:
-                    tid = self.queue_mgr._extract_id(self.mpris.track_id)
-                    new_pid = self.queue_mgr._find_playlist_for_track(tid) if tid else None
-                    cur_pid = self.queue_mgr.context_uri.split(":")[-1]
-                    if not new_pid or new_pid == cur_pid:
-                        # Spotify transitioned off-playlist to the song's album/author/radio!
-                        # Seamlessly advance to the NEXT track of OUR playlist:
-                        is_shuffle = getattr(self, "user_shuffle", False)
-                        if is_shuffle:
-                            curr_id = self.queue_mgr._extract_id(self.mpris.track_id)
-                            played_ids = {self.queue_mgr._extract_id(u) for u in getattr(self, "shuffle_history", [])}
-                            candidates = [t for t in self.queue_mgr.all_context_tracks if self.queue_mgr._extract_id(t.get("uri")) != curr_id and self.queue_mgr._extract_id(t.get("uri")) not in played_ids]
-                            if not candidates:
-                                candidates = [t for t in self.queue_mgr.all_context_tracks if self.queue_mgr._extract_id(t.get("uri")) != curr_id]
-                                self.shuffle_history = []
-                            if candidates:
-                                chosen = random.choice(candidates)
-                                self.play_track_silent(chosen.get("uri"))
-                                return False
-                        upcoming = self.queue_mgr.get_upcoming_tracks(limit=1, loop=(loop != "None"))
-                        if upcoming:
-                            self.play_track_silent(upcoming[0].get("uri"))
-                            return False
-                        elif self.queue_mgr.all_context_tracks:
-                            self.play_track_silent(self.queue_mgr.all_context_tracks[0].get("uri"))
-                            return False
 
             if self.mpris.track_id:
                 if not hasattr(self, "shuffle_history") or self.shuffle_history is None:
