@@ -11,13 +11,14 @@ PROPS_INTERFACE = "org.freedesktop.DBus.Properties"
 CACHE_DIR = os.path.expanduser("~/.cache/spotify-mini-player/covers")
 
 class MPRISManager:
-    def __init__(self, on_update_cb=None, on_status_cb=None, on_avail_cb=None, on_media_key_cb=None, on_volume_cb=None, on_options_cb=None):
+    def __init__(self, on_update_cb=None, on_status_cb=None, on_avail_cb=None, on_media_key_cb=None, on_volume_cb=None, on_options_cb=None, on_seeked_cb=None):
         self.on_update_cb = on_update_cb
         self.on_status_cb = on_status_cb
         self.on_avail_cb = on_avail_cb
         self.on_media_key_cb = on_media_key_cb
         self.on_volume_cb = on_volume_cb
         self.on_options_cb = on_options_cb
+        self.on_seeked_cb = on_seeked_cb
 
         self.bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
         self.player_proxy = None
@@ -161,8 +162,15 @@ class MPRISManager:
             GLib.idle_add(lambda k=key: self.on_media_key_cb(k))
 
     def _on_seeked(self, conn, sender, path, iface, signal, params, user_data):
-        if self.on_media_key_cb:
-            GLib.idle_add(self.on_media_key_cb)
+        pos_us = 0
+        try:
+            unpacked = params.unpack()
+            if unpacked:
+                pos_us = int(unpacked[0])
+        except Exception:
+            pass
+        if self.on_seeked_cb:
+            GLib.idle_add(lambda: self.on_seeked_cb(pos_us))
 
     def _on_properties_changed(self, connection, sender, path, iface, signal, params, user_data):
         interface_name, changed, invalidated = params.unpack()
@@ -188,7 +196,7 @@ class MPRISManager:
             if options_changed and self.on_options_cb:
                 self.on_options_cb(self.shuffle, self.loop_status)
             if self.on_update_cb:
-                self.on_update_cb(track_changed=track_changed, is_user_action=True)
+                self.on_update_cb(track_changed=track_changed, is_user_action=track_changed)
 
     def refresh_metadata(self):
         if not self.player_proxy:
@@ -287,7 +295,7 @@ class MPRISManager:
     def get_fresh_position(self):
         """Fetches uncached live Position directly from D-Bus in microseconds."""
         if not self.props_proxy or not self.is_available:
-            return 0
+            return -1
         try:
             val = self.props_proxy.call_sync(
                 "Get",
@@ -298,7 +306,7 @@ class MPRISManager:
             ).unpack()[0]
             return val
         except Exception:
-            return 0
+            return -1
 
     def get_fresh_track_id(self):
         """Fetches uncached live mpris:trackid directly from D-Bus."""
@@ -401,17 +409,19 @@ class MPRISManager:
             except Exception as e:
                 print(f"Raise failed: {e}")
 
-    def toggle_shuffle(self):
-        new_val = not self.shuffle
+    def set_shuffle(self, val: bool):
+        self.shuffle = bool(val)
         if self.props_proxy:
             try:
-                params = GLib.Variant("(ssv)", (PLAYER_INTERFACE, "Shuffle", GLib.Variant("b", new_val)))
+                params = GLib.Variant("(ssv)", (PLAYER_INTERFACE, "Shuffle", GLib.Variant("b", self.shuffle)))
                 self.props_proxy.call_sync("Set", params, Gio.DBusCallFlags.NONE, -1, None)
             except Exception as e:
-                print(f"toggle_shuffle failed: {e}")
-        self.shuffle = new_val
+                print(f"set_shuffle failed: {e}")
         if self.on_options_cb:
             self.on_options_cb(self.shuffle, self.loop_status)
+
+    def toggle_shuffle(self):
+        self.set_shuffle(not self.shuffle)
 
     def cycle_loop_status(self):
         modes = ["None", "Playlist", "Track"]

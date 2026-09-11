@@ -14,7 +14,7 @@ gi.require_version('Adw', '1')
 gi.require_version('GdkX11', '4.0')
 gi.require_version('GdkPixbuf', '2.0')
 
-from gi.repository import Gtk, Adw, Gdk, GdkX11, GdkPixbuf, GLib, Pango
+from gi.repository import Gtk, Adw, Gdk, GdkX11, GdkPixbuf, GLib, Pango, Gio
 
 from mpris_manager import MPRISManager
 from visualizer import VisualizerWidget
@@ -34,6 +34,28 @@ def format_time(seconds):
     mins = total_secs // 60
     secs = total_secs % 60
     return f"{mins:02d}:{secs:02d}"
+
+def is_single_track(title, album):
+    if not title or not album:
+        return False
+    t_clean = title.strip().casefold()
+    a_clean = album.strip().casefold()
+    return (a_clean == t_clean) or (a_clean in (f"{t_clean} - single", f"{t_clean} (single)"))
+
+def format_artist_and_album(artist, album, title=""):
+    artist = (artist or "").strip()
+    if artist.casefold() == "spotify":
+        artist = ""
+    album = (album or "").strip()
+    title = (title or "").strip()
+
+    if is_single_track(title, album):
+        single_str = t("single")
+        return f"{artist} • {single_str}" if artist else single_str
+
+    if artist and album:
+        return f"{artist} • {album}"
+    return artist or album or ""
 
 def get_active_window():
     try:
@@ -239,6 +261,46 @@ def move_window_to(xid, x, y):
     except Exception as e:
         print(f"Error moving window: {e}")
 
+def is_pointer_over_window(xid, width=None, height=None):
+    """Checks if mouse cursor is physically inside the window bounding box."""
+    if not xid:
+        return False
+    try:
+        x11 = ctypes.CDLL('libX11.so.6')
+        x11.XOpenDisplay.restype = ctypes.c_void_p
+        disp = x11.XOpenDisplay(None)
+        if not disp:
+            return False
+        root = x11.XDefaultRootWindow(disp)
+        r_root, r_child = ctypes.c_ulong(), ctypes.c_ulong()
+        rx, ry, wx, wy = ctypes.c_int(), ctypes.c_int(), ctypes.c_int(), ctypes.c_int()
+        mask = ctypes.c_uint()
+        res = x11.XQueryPointer(disp, xid, ctypes.byref(r_root), ctypes.byref(r_child),
+                                ctypes.byref(rx), ctypes.byref(ry),
+                                ctypes.byref(wx), ctypes.byref(wy),
+                                ctypes.byref(mask))
+        if res == 0:
+            x11.XCloseDisplay(disp)
+            return False
+
+        if width is not None and height is not None:
+            w, h = width, height
+        else:
+            root_ret, x_ret, y_ret = ctypes.c_ulong(), ctypes.c_int(), ctypes.c_int()
+            w_ret, h_ret = ctypes.c_uint(), ctypes.c_uint()
+            border_ret, depth_ret = ctypes.c_uint(), ctypes.c_uint()
+            geom_res = x11.XGetGeometry(disp, xid, ctypes.byref(root_ret),
+                                       ctypes.byref(x_ret), ctypes.byref(y_ret),
+                                       ctypes.byref(w_ret), ctypes.byref(h_ret),
+                                       ctypes.byref(border_ret), ctypes.byref(depth_ret))
+            w = w_ret.value if geom_res != 0 else 380
+            h = h_ret.value if geom_res != 0 else 450
+
+        x11.XCloseDisplay(disp)
+        return (0 <= wx.value <= w) and (0 <= wy.value <= h)
+    except Exception:
+        return False
+
 def set_window_always_above(xid, enable=True):
     """Ensures window stays above all other windows using proper EWMH client messages."""
     try:
@@ -324,8 +386,10 @@ class SpotifyMiniWindow(Gtk.Window):
         # Window Position Persistence
         self.saved_x = None
         self.saved_y = None
+        self.user_shuffle = False
         self._load_config()
 
+        self._ignore_rewind_until = 0.0
         self.hide_timer_id = None
         self.fade_timer_id = None
         self.seek_timer_id = None
@@ -348,7 +412,8 @@ class SpotifyMiniWindow(Gtk.Window):
             on_avail_cb=self._on_availability_changed,
             on_media_key_cb=self._on_user_media_action,
             on_volume_cb=self._on_spotify_volume_changed,
-            on_options_cb=self._on_mpris_options_changed
+            on_options_cb=self._on_mpris_options_changed,
+            on_seeked_cb=self._on_mpris_seeked
         )
 
         self._build_ui()
@@ -373,6 +438,7 @@ class SpotifyMiniWindow(Gtk.Window):
                     self.saved_x = data.get("x")
                     self.saved_y = data.get("y")
                     self.is_pinned = data.get("pinned", False)
+                    self.user_shuffle = data.get("user_shuffle", False)
             except Exception as e:
                 print(f"Failed to load config: {e}")
 
@@ -381,7 +447,8 @@ class SpotifyMiniWindow(Gtk.Window):
             data = {
                 "x": self.saved_x,
                 "y": self.saved_y,
-                "pinned": self.is_pinned
+                "pinned": self.is_pinned,
+                "user_shuffle": getattr(self, "user_shuffle", False)
             }
             with open(CONFIG_FILE, "w") as f:
                 json.dump(data, f)
@@ -897,18 +964,29 @@ class SpotifyMiniWindow(Gtk.Window):
             self._switching_track = False
             self._pending_target_uri = None
             self._switching_timer_id = None
+            self._apply_metadata(track_changed=False)
             return False
 
         self._switching_timer_id = GLib.timeout_add(duration_ms, _clear_switching)
 
     def on_user_next_clicked(self, *args):
         all_tracks = self.queue_mgr.all_context_tracks
-        if not all_tracks:
+        if not all_tracks or len(all_tracks) <= 1:
             self._set_switching_track(duration_ms=3500)
-            self.mpris.next()
+            self._ignore_rewind_until = time.time() + 1.5
+            self.anchor_pos = 0.0
+            self.anchor_time = time.time()
+            self.last_sync_pos = 0.0
+            self.scale.set_value(0)
+            self.pos_label.set_text("00:00")
+            if all_tracks and all_tracks[0].get("uri"):
+                self.play_track_silent(all_tracks[0].get("uri"))
+            else:
+                self.mpris.next()
+            self.show_osd(4500, force=True)
             return
 
-        is_shuffle = getattr(self.mpris, "shuffle", False)
+        is_shuffle = getattr(self, "user_shuffle", False)
         if is_shuffle:
             if self._skip_target_idx is not None and 0 <= self._skip_target_idx < len(all_tracks):
                 curr_track = all_tracks[self._skip_target_idx]
@@ -961,24 +1039,37 @@ class SpotifyMiniWindow(Gtk.Window):
             target_track = all_tracks[next_idx]
 
         self._apply_immediate_skip_ui_and_debounce(target_track)
+        self.show_osd(4500, force=True)
 
     def on_user_prev_clicked(self, *args):
         fresh_us = self.mpris.get_fresh_position()
         if fresh_us > 3_000_000 and self._skip_target_idx is None:
-            self.mpris.set_position(0)
+            self._ignore_rewind_until = time.time() + 1.5
+            self.mpris.previous()
             self.anchor_pos = 0.0
             self.anchor_time = time.time()
             self.scale.set_value(0)
             self.pos_label.set_text("00:00")
+            self.show_osd(4500, force=True)
             return
 
         all_tracks = self.queue_mgr.all_context_tracks
-        if not all_tracks:
+        if not all_tracks or len(all_tracks) <= 1:
             self._set_switching_track(duration_ms=3500)
-            self.mpris.previous()
+            self._ignore_rewind_until = time.time() + 1.5
+            self.anchor_pos = 0.0
+            self.anchor_time = time.time()
+            self.last_sync_pos = 0.0
+            self.scale.set_value(0)
+            self.pos_label.set_text("00:00")
+            if all_tracks and all_tracks[0].get("uri"):
+                self.play_track_silent(all_tracks[0].get("uri"))
+            else:
+                self.mpris.previous()
+            self.show_osd(4500, force=True)
             return
 
-        is_shuffle = getattr(self.mpris, "shuffle", False)
+        is_shuffle = getattr(self, "user_shuffle", False)
         if is_shuffle:
             if hasattr(self, "shuffle_history") and self.shuffle_history:
                 curr_uri = self.mpris.track_id or (self.queue_mgr.current_track.get("uri") if self.queue_mgr.current_track else "")
@@ -993,6 +1084,7 @@ class SpotifyMiniWindow(Gtk.Window):
                         self._skip_target_idx = target_idx
                         self.queue_mgr.last_valid_idx = target_idx
                         self._apply_immediate_skip_ui_and_debounce(all_tracks[target_idx])
+                        self.show_osd(4500, force=True)
                         return
 
             past = self.queue_mgr.get_past_tracks(limit=10, loop=True)
@@ -1025,6 +1117,7 @@ class SpotifyMiniWindow(Gtk.Window):
             target_track = all_tracks[prev_idx]
 
         self._apply_immediate_skip_ui_and_debounce(target_track)
+        self.show_osd(4500, force=True)
 
     def _apply_immediate_skip_ui_and_debounce(self, target_track):
         target_uri = target_track.get("uri", "")
@@ -1060,10 +1153,7 @@ class SpotifyMiniWindow(Gtk.Window):
         if artist.casefold() == "spotify":
             artist = ""
         album = target_track.get("album") or ""
-        if album:
-            artist_text = f"{artist} • {album}" if artist else album
-        else:
-            artist_text = artist
+        artist_text = format_artist_and_album(artist, album, target_track.get("title") or "")
         self.artist_label.set_text(artist_text)
         self.artist_label.set_tooltip_text(artist_text)
 
@@ -1130,7 +1220,7 @@ class SpotifyMiniWindow(Gtk.Window):
                     if artist.casefold() == "spotify":
                         artist = ""
                     album = t.get("album") or ""
-                    artist_text = f"{artist} • {album}" if (artist and album) else (artist or album)
+                    artist_text = format_artist_and_album(artist, album, t.get("title") or "")
                     if artist_text:
                         self.artist_label.set_text(artist_text)
                         self.artist_label.set_tooltip_text(artist_text)
@@ -1567,8 +1657,8 @@ class SpotifyMiniWindow(Gtk.Window):
         sp_on_screen = is_spotify_on_screen() or is_spotify_active()
 
         if sp_on_screen:
-            # If Spotify desktop is open on screen, hide the mini player (even if pinned or showing OSD)
-            if self.get_visible():
+            # If Spotify desktop is open on screen, hide the mini player (unless user is actively scrubbing or hovering it)
+            if self.get_visible() and not self.is_hovered and not self.is_scrubbing:
                 self._cancel_hide_timer()
                 self._cancel_fade()
                 self._was_pinned_before_spotify = self.is_pinned
@@ -1582,14 +1672,7 @@ class SpotifyMiniWindow(Gtk.Window):
                 self._was_pinned_before_spotify = False
                 # Reopen ONLY if the mini player was pinned! If not pinned, do not reopen.
                 if self.is_pinned and was_pinned:
-                    self.set_opacity(1.0)
-                    self.set_visible(True)
-                    surface = self.get_surface()
-                    if isinstance(surface, GdkX11.X11Surface):
-                        xid = surface.get_xid()
-                        set_window_always_above(xid, True)
-                        if self.saved_x is not None and self.saved_y is not None:
-                            move_window_to(xid, self.saved_x, self.saved_y)
+                    self.show_osd(force=True)
                     self._user_scrolled_queue = False
                     if self.is_queue_open:
                         GLib.idle_add(self._scroll_to_current_track)
@@ -1608,6 +1691,15 @@ class SpotifyMiniWindow(Gtk.Window):
             if is_window_minimized(my_xid):
                 if self.is_pinned:
                     self.set_pinned(False)
+
+            # Check if pointer physically left the window to fix stuck is_hovered
+            if self.get_visible() and not self.is_pinned:
+                pointer_inside = is_pointer_over_window(my_xid, self.get_width(), self.get_height())
+                if not pointer_inside:
+                    if self.is_hovered:
+                        self.is_hovered = False
+                    if not self.hide_timer_id and not self.is_scrubbing and self.get_opacity() > 0.9:
+                        self._schedule_hide(3500)
 
         # Track window position for saving when visible
         if self.get_visible():
@@ -1645,8 +1737,10 @@ class SpotifyMiniWindow(Gtk.Window):
             print(f"Failed to auto-restart: {e}")
 
     def _on_shuffle_clicked(self, button=None):
-        self.mpris.toggle_shuffle()
-        if getattr(self.mpris, "shuffle", False):
+        self.user_shuffle = not getattr(self, "user_shuffle", False)
+        self.mpris.set_shuffle(self.user_shuffle)
+        self._save_config()
+        if self.user_shuffle:
             curr_uri = self.mpris.track_id or (self.queue_mgr.current_track.get("uri") if self.queue_mgr.current_track else "")
             self.shuffle_history = [curr_uri] if curr_uri else []
         self._update_playback_options_ui()
@@ -1670,6 +1764,15 @@ class SpotifyMiniWindow(Gtk.Window):
         old_loop = getattr(self, "_last_loop_status", None)
         old_shuffle = getattr(self, "_last_shuffle_status", None)
         self._last_loop_status = loop_status
+
+        if is_spotify_active():
+            self.user_shuffle = shuffle
+            self._save_config()
+        else:
+            if shuffle != getattr(self, "user_shuffle", False):
+                self.mpris.set_shuffle(self.user_shuffle)
+                shuffle = self.user_shuffle
+
         self._last_shuffle_status = shuffle
         GLib.idle_add(self._update_playback_options_ui)
         mode_changed = (old_loop is not None and old_loop != loop_status) or (old_shuffle is not None and old_shuffle != shuffle)
@@ -1687,7 +1790,7 @@ class SpotifyMiniWindow(Gtk.Window):
             return
 
         # 1. Shuffle state
-        is_shuffled = getattr(self.mpris, "shuffle", False)
+        is_shuffled = getattr(self, "user_shuffle", False)
         if is_shuffled:
             self.shuffle_btn.add_css_class("active-control")
             self.shuffle_btn.set_tooltip_text(t("shuffle_enabled"))
@@ -1734,6 +1837,8 @@ class SpotifyMiniWindow(Gtk.Window):
         self._rebuild_queue_ui()
 
     def _on_mouse_enter(self, controller, x, y):
+        if not self.get_visible() or self.get_opacity() < 0.1:
+            return
         self.is_hovered = True
         self._cancel_hide_timer()
         self._cancel_fade()
@@ -1807,40 +1912,24 @@ class SpotifyMiniWindow(Gtk.Window):
         if fresh_us >= 0:
             fresh_sec = fresh_us / 1_000_000.0
 
-            if self.last_sync_pos > 2.0 and fresh_sec < 1.0:
+            is_rewind = (self.last_sync_pos > fresh_sec + 0.25 and fresh_sec < 0.3) or (self.last_sync_pos > 1.8 and fresh_sec < 1.2)
+            if is_rewind:
                 self.anchor_pos = fresh_sec
                 self.anchor_time = time.time()
                 self.scale.set_value(fresh_sec)
                 self.pos_label.set_text(format_time(fresh_sec))
-                self.show_osd(4500)
 
-                # Check if the EXACT SAME track looped on itself (single-track loop when played via open_uri)
-                loop = getattr(self.mpris, "loop_status", "None")
-                if not getattr(self, "_switching_track", False) and loop != "Track" and self.duration_sec > 10.0 and self.last_sync_pos >= (self.duration_sec - 3.5):
-                    # Check DBus track id to make sure this is actually a loop of the same track,
-                    # and NOT a new track where PropertiesChanged signal is on its way.
-                    fresh_track_id = self.mpris.get_fresh_track_id()
-
-                    if fresh_track_id and fresh_track_id == self.last_track_id and self.queue_mgr.all_context_tracks:
-                        # The track truly restarted at 0 without changing track ID!
-                        is_loop = (loop != "None")
-                        is_shuffle = getattr(self.mpris, "shuffle", False)
-                        if is_shuffle:
-                            curr_id = self.queue_mgr._extract_id(self.last_track_id)
-                            played_ids = {self.queue_mgr._extract_id(u) for u in getattr(self, "shuffle_history", [])}
-                            candidates = [t for t in self.queue_mgr.all_context_tracks if self.queue_mgr._extract_id(t.get("uri")) != curr_id and self.queue_mgr._extract_id(t.get("uri")) not in played_ids]
-                            if not candidates:
-                                candidates = [t for t in self.queue_mgr.all_context_tracks if self.queue_mgr._extract_id(t.get("uri")) != curr_id]
-                                self.shuffle_history = [self.last_track_id] if self.last_track_id else []
-                            if candidates:
-                                chosen = random.choice(candidates)
-                                GLib.idle_add(lambda u=chosen.get("uri"): self.play_track_silent(u))
-                        else:
-                            upcoming = self.queue_mgr.get_upcoming_tracks(limit=1, loop=is_loop)
-                            if upcoming:
-                                GLib.idle_add(lambda u=upcoming[0].get("uri"): self.play_track_silent(u))
-                            elif is_loop and self.queue_mgr.all_context_tracks:
-                                GLib.idle_add(lambda u=self.queue_mgr.all_context_tracks[0].get("uri"): self.play_track_silent(u))
+                if time.time() >= getattr(self, "_ignore_rewind_until", 0.0):
+                    # Check if the EXACT SAME track looped on itself at natural completion:
+                    loop = getattr(self.mpris, "loop_status", "None")
+                    was_at_song_end = (getattr(self, "duration_sec", 0.0) > 5.0 and self.last_sync_pos >= max(1.0, getattr(self, "duration_sec", 0.0) - 3.5))
+                    if not getattr(self, "_switching_track", False) and loop != "Track" and was_at_song_end and not is_spotify_active():
+                        fresh_track_id = self.mpris.get_fresh_track_id()
+                        if fresh_track_id and fresh_track_id == self.last_track_id and self.queue_mgr.all_context_tracks:
+                            if len(self.queue_mgr.all_context_tracks) > 1:
+                                self.on_user_next_clicked()
+                                self.last_sync_pos = fresh_sec
+                                return True
             elif abs(fresh_sec - (self.anchor_pos + (time.time() - self.anchor_time))) > 1.2:
                 self.anchor_pos = fresh_sec
                 self.anchor_time = time.time()
@@ -1848,19 +1937,33 @@ class SpotifyMiniWindow(Gtk.Window):
             self.last_sync_pos = fresh_sec
         return True
 
+    def _on_mpris_seeked(self, pos_us):
+        if not self.mpris.is_available or self.is_scrubbing:
+            return
+        fresh_sec = pos_us / 1_000_000.0
+        self.anchor_pos = fresh_sec
+        self.anchor_time = time.time()
+        self.last_sync_pos = fresh_sec
+        self.scale.set_value(fresh_sec)
+        self.pos_label.set_text(format_time(fresh_sec))
+
     def _on_user_media_action(self, key=""):
         key_str = str(key).strip().lower()
         if key_str in ("next", "nexttrack"):
             if self.queue_mgr.all_context_tracks:
                 self.on_user_next_clicked()
-                return
+            else:
+                self.mpris.next()
         elif key_str in ("previous", "prev", "prevtrack"):
             if self.queue_mgr.all_context_tracks:
                 self.on_user_prev_clicked()
-                return
-
-        if is_spotify_active() or is_spotify_on_screen():
-            return
+            else:
+                fresh_us = self.mpris.get_fresh_position()
+                if fresh_us > 3_000_000:
+                    self._ignore_rewind_until = time.time() + 1.5
+                self.mpris.previous()
+        elif key_str in ("play", "pause", "playpause"):
+            self.mpris.play_pause()
 
         fresh_us = self.mpris.get_fresh_position()
         if fresh_us >= 0:
@@ -1870,18 +1973,21 @@ class SpotifyMiniWindow(Gtk.Window):
             self.scale.set_value(fresh_sec)
             self.pos_label.set_text(format_time(fresh_sec))
 
-        self.show_osd(4500)
+        self.show_osd(4500, force=True)
 
-    def show_osd(self, duration_ms=4500):
-        # If user is working in Spotify or Spotify is open on screen, do NOT pop up
-        if is_spotify_active() or is_spotify_on_screen():
+    def show_osd(self, duration_ms=4500, force=False):
+        # If user is working actively in Spotify, do NOT pop up unless forced
+        if not force and is_spotify_active():
             return
 
         self._cancel_fade()
-        self._cancel_hide_timer()
         self.set_opacity(1.0)
         self.set_visible(True)
-        self.unminimize()
+        surface = self.get_surface()
+        if surface and isinstance(surface, Gdk.Toplevel) and (surface.get_state() & Gdk.ToplevelState.MINIMIZED):
+            self.unminimize()
+        elif isinstance(surface, GdkX11.X11Surface) and is_window_minimized(surface.get_xid()):
+            self.unminimize()
         self.present()
 
         surface = self.get_surface()
@@ -1891,6 +1997,8 @@ class SpotifyMiniWindow(Gtk.Window):
             set_window_always_above(xid, True)
             if self.saved_x is not None and self.saved_y is not None:
                 move_window_to(xid, self.saved_x, self.saved_y)
+            if not is_pointer_over_window(xid, self.get_width(), self.get_height()):
+                self.is_hovered = False
 
         if not self.is_pinned:
             if not self.is_hovered and not self.is_scrubbing:
@@ -1943,6 +2051,8 @@ class SpotifyMiniWindow(Gtk.Window):
                 self.set_opacity(0.0)
                 self.set_visible(False)
                 self.fade_timer_id = None
+                self.is_hovered = False
+                self.is_scrubbing = False
                 return False
 
             ease = t * t * (3.0 - 2.0 * t)
@@ -1955,6 +2065,8 @@ class SpotifyMiniWindow(Gtk.Window):
     def hide_osd_immediate(self):
         self._cancel_hide_timer()
         self._cancel_fade()
+        self.is_hovered = False
+        self.is_scrubbing = False
         self.set_visible(False)
 
     def _on_key_pressed(self, controller, keyval, keycode, state):
@@ -1970,7 +2082,6 @@ class SpotifyMiniWindow(Gtk.Window):
     def _on_minimize_clicked(self, button=None):
         if self.is_pinned:
             self.set_pinned(False)
-        self.minimize()
         self.hide_osd_immediate()
 
     def _on_close_clicked(self, button=None):
@@ -2026,11 +2137,11 @@ class SpotifyMiniWindow(Gtk.Window):
         if available:
             self.stack.set_visible_child_name("player")
             self._apply_metadata(track_changed=True)
-            self.show_osd(4500)
+            if self.is_pinned or self.get_visible():
+                self.show_osd(4500)
         else:
             self.stack.set_visible_child_name("offline")
             self.visualizer.set_playing(False)
-            self.show_osd(4500)
         return False
 
     def _on_status_updated(self, status):
@@ -2078,18 +2189,20 @@ class SpotifyMiniWindow(Gtk.Window):
                     pass
                 self._switching_timer_id = None
 
+        if getattr(self, "_switching_track", False) and not getattr(self, "_pending_target_uri", None) and getattr(self, "_skip_target_idx", None) is None:
+            self._switching_track = False
+            if getattr(self, "_switching_timer_id", None):
+                try:
+                    GLib.source_remove(self._switching_timer_id)
+                except Exception:
+                    pass
+                self._switching_timer_id = None
+
         self.stack.set_visible_child_name("player")
         self.title_label.set_text(self.mpris.title)
         self.title_label.set_tooltip_text(self.mpris.title)
 
-        artist_text = (self.mpris.artist or "").strip()
-        if artist_text.casefold() == "spotify":
-            artist_text = ""
-        if self.mpris.album:
-            if artist_text:
-                artist_text += f" • {self.mpris.album}"
-            else:
-                artist_text = self.mpris.album
+        artist_text = format_artist_and_album(self.mpris.artist, self.mpris.album, self.mpris.title)
         self.artist_label.set_text(artist_text)
         self.artist_label.set_tooltip_text(artist_text)
 
@@ -2132,7 +2245,7 @@ class SpotifyMiniWindow(Gtk.Window):
                     if not new_pid or new_pid == cur_pid:
                         # Spotify transitioned off-playlist to the song's album/author/radio!
                         # Seamlessly advance to the NEXT track of OUR playlist:
-                        is_shuffle = getattr(self.mpris, "shuffle", False)
+                        is_shuffle = getattr(self, "user_shuffle", False)
                         if is_shuffle:
                             curr_id = self.queue_mgr._extract_id(self.mpris.track_id)
                             played_ids = {self.queue_mgr._extract_id(u) for u in getattr(self, "shuffle_history", [])}
@@ -2219,8 +2332,42 @@ class SpotifyMiniWindow(Gtk.Window):
 
 class SpotifyMiniApp(Adw.Application):
     def __init__(self):
-        super().__init__(application_id="com.github.vibe.spotifymini")
+        super().__init__(
+            application_id="com.github.vibe.spotifymini",
+            flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE
+        )
         self.win = None
+        self.add_main_option("next", ord("n"), GLib.OptionFlags.NONE, GLib.OptionArg.NONE, "Skip to next track", None)
+        self.add_main_option("prev", ord("p"), GLib.OptionFlags.NONE, GLib.OptionArg.NONE, "Skip to previous track", None)
+        self.add_main_option("play-pause", ord("t"), GLib.OptionFlags.NONE, GLib.OptionArg.NONE, "Toggle play/pause", None)
+        self.add_main_option("show", ord("s"), GLib.OptionFlags.NONE, GLib.OptionArg.NONE, "Show mini player HUD", None)
+        self.add_main_option("hide", ord("h"), GLib.OptionFlags.NONE, GLib.OptionArg.NONE, "Hide mini player HUD", None)
+        self.add_main_option("toggle-visible", ord("v"), GLib.OptionFlags.NONE, GLib.OptionArg.NONE, "Toggle window visibility", None)
+
+    def do_command_line(self, command_line):
+        options = command_line.get_options_dict()
+        self.activate()
+        if options.contains("next"):
+            GLib.idle_add(self.win.on_user_next_clicked)
+            GLib.idle_add(lambda: self.win.show_osd(4500, force=True))
+        elif options.contains("prev"):
+            self.win._ignore_rewind_until = time.time() + 1.5
+            GLib.idle_add(self.win.on_user_prev_clicked)
+            GLib.idle_add(lambda: self.win.show_osd(4500, force=True))
+        elif options.contains("play-pause"):
+            GLib.idle_add(self.win.mpris.play_pause)
+            GLib.idle_add(lambda: self.win.show_osd(4500, force=True))
+        elif options.contains("show"):
+            GLib.idle_add(lambda: self.win.show_osd(4500, force=True))
+        elif options.contains("hide"):
+            GLib.idle_add(self.win.hide_osd_immediate)
+        elif options.contains("toggle-visible"):
+            GLib.idle_add(lambda: self.win.hide_osd_immediate() if (self.win.get_visible() and self.win.get_opacity() > 0.1) else self.win.show_osd(4500, force=True))
+        else:
+            GLib.idle_add(lambda: self.win.show_osd(4500, force=True))
+        command_line.set_exit_status(0)
+        command_line.done()
+        return 0
 
     def do_activate(self):
         style_mgr = Adw.StyleManager.get_default()

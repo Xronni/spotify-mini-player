@@ -53,14 +53,14 @@
   ```
 
 #### Option A: Install Debian / Ubuntu Package (.deb) — Recommended
-Download `spotify-mini-player_1.0.0_all.deb` from the [Releases page](https://github.com/Xronni/spotify-mini-player/releases/latest) and install:
+Download `spotify-mini-player_1.1.0_all.deb` from the [Releases page](https://github.com/Xronni/spotify-mini-player/releases/latest) and install:
 ```bash
-sudo dpkg -i spotify-mini-player_1.0.0_all.deb
+sudo dpkg -i spotify-mini-player_1.1.0_all.deb
 sudo apt install -f  # automatically install dependencies if needed
 ```
 
 #### Option B: Standalone Archive or Git Clone
-1. Clone the repository or download `spotify-mini-player-v1.0.0-linux-x86_64.tar.gz`:
+1. Clone the repository or download `spotify-mini-player-v1.1.0-linux-x86_64.tar.gz`:
    ```bash
    git clone https://github.com/Xronni/spotify-mini-player.git
    cd spotify-mini-player
@@ -97,7 +97,8 @@ sudo apt install -f  # automatically install dependencies if needed
 | **Click** | 📋 Queue Button | Slides down the scrollable queue drawer with auto-centering |
 | **Click** | 📌 Pin Button | Toggles "Always on Top" pinned mode |
 | **Click** | ▶ Track Row | Plays the selected queue track silently via MPRIS |
-| **Global Media Keys** | Keyboard | Triggers instant smooth OSD pop-up |
+| **Global Media Keys** | Keyboard | Triggers instant smooth OSD pop-up and skips track |
+| **CLI / Custom Shortcuts** | `spotify-mini-player --next` / `--prev` / `--play-pause` / `--toggle-visible` | Bind to system shortcuts for instant direct control |
 
 ---
 
@@ -125,14 +126,14 @@ sudo apt install -f  # automatically install dependencies if needed
   ```
 
 #### Вариант А: Установка пакета Debian / Ubuntu (.deb) — Рекомендуется
-Скачайте `spotify-mini-player_1.0.0_all.deb` со страницы [Релизов](https://github.com/Xronni/spotify-mini-player/releases/latest) и выполните:
+Скачайте `spotify-mini-player_1.1.0_all.deb` со страницы [Релизов](https://github.com/Xronni/spotify-mini-player/releases/latest) и выполните:
 ```bash
-sudo dpkg -i spotify-mini-player_1.0.0_all.deb
+sudo dpkg -i spotify-mini-player_1.1.0_all.deb
 sudo apt install -f  # автоматическая установка зависимостей при необходимости
 ```
 
 #### Вариант Б: Портативный запуск или сборка из Git
-1. Клонируйте репозиторий или скачайте архив `spotify-mini-player-v1.0.0-linux-x86_64.tar.gz`:
+1. Клонируйте репозиторий или скачайте архив `spotify-mini-player-v1.1.0-linux-x86_64.tar.gz`:
    ```bash
    git clone https://github.com/Xronni/spotify-mini-player.git
    cd spotify-mini-player
@@ -169,7 +170,8 @@ sudo apt install -f  # автоматическая установка зави�
 | **Клик** | 📋 Кнопка очереди | Раскрывает панель очереди с автоцентрированием на текущем треке |
 | **Клик** | 📌 Кнопка булавки | Фиксация мини-плеера поверх всех окон (Always on Top) |
 | **Клик** | ▶ Строка трека | Мгновенный тихий запуск трека из очереди |
-| **Медиа-клавиши** | Клавиатура | Вызов всплывающего OSD-виджета на 3.5 секунды |
+| **Медиа-клавиши** | Клавиатура | Мгновенно переключает трек и показывает OSD-виджет |
+| **CLI / Хоткеи системы** | `spotify-mini-player --next` / `--prev` / `--play-pause` / `--toggle-visible` | Можно назначить на любые горячие клавиши в настройках системы |
 
 ---
 

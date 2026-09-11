@@ -8,6 +8,12 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from gi.repository import GLib
 
+try:
+    from i18n import _
+except ImportError:
+    def _(k, **kwargs):
+        return k
+
 CACHE_DIR = os.path.expanduser("~/.cache/spotify-mini-player")
 
 def is_valid_name(name):
@@ -278,9 +284,16 @@ class QueueManager:
                 if is_valid_name(c_name):
                     self.context_name = c_name
                     return self.context_name
+            if is_valid_name(self.context_name) and self.context_name != current_album:
+                return self.context_name
 
-        if is_valid_name(self.context_name) and not (self.context_uri and self.context_uri.startswith("spotify:playlist:") and self.context_name == current_album):
-            return self.context_name
+        # If not playing a playlist (e.g. playing an album, track/single, or unknown non-playlist)
+        if not (self.context_uri and self.context_uri.startswith("spotify:playlist:")):
+            if current_album and is_valid_name(current_album):
+                self.context_name = current_album
+                return self.context_name
+            if is_valid_name(self.context_name):
+                return self.context_name
 
         # 2. Try detecting active context from restore state or LevelDB
         detected = self._detect_active_context_uri()
@@ -460,7 +473,7 @@ class QueueManager:
             if t.get("title") in ("Трек", "", None, "Track"):
                 t["title"] = title
                 t["artist"] = artist
-            if album and not t.get("album"):
+            if album:
                 t["album"] = album
             self.current_track = {
                 "title": title,
@@ -469,7 +482,10 @@ class QueueManager:
                 "album": album,
                 "track_num": found_idx + 1
             }
-            if not is_valid_name(self.context_name):
+            if not (self.context_uri and self.context_uri.startswith("spotify:playlist:")):
+                if is_valid_name(album):
+                    self.context_name = album
+            elif not is_valid_name(self.context_name):
                 self.get_context_name(current_album=album)
             self.notify(order_changed=order_changed)
             self._resolve_missing_tracks_async(found_idx)
@@ -496,6 +512,7 @@ class QueueManager:
                         "title": title,
                         "artist": artist,
                         "uri": uri,
+                        "album": album,
                         "track_num": fresh_idx + 1
                     }
                     if not is_valid_name(self.context_name):
@@ -504,88 +521,29 @@ class QueueManager:
                 self._resolve_missing_tracks_async(fresh_idx)
                 return
 
-        # Case B: User switched to another real USER playlist!
-        detected_pid = self._find_playlist_for_track(curr_id) if curr_id else None
-        if detected_pid:
-            fresh_tracks = self._extract_playlist_from_ldb(detected_pid)
-            fresh_idx = -1
-            for idx, t in enumerate(fresh_tracks):
-                if (curr_id and t["tid"] == curr_id) or (t.get("title", "").strip().lower() == norm_title):
-                    fresh_idx = idx
-                    t["title"] = title
-                    t["artist"] = artist
-                    break
+        # Single detection
+        norm_t = title.strip().casefold()
+        norm_a = album.strip().casefold()
+        is_single = bool(norm_t and norm_a and (norm_a == norm_t or norm_a in (f"{norm_t} - single", f"{norm_t} (single)")))
 
-            pl_ctx_uri = f"spotify:playlist:{detected_pid}"
-            ldb_name = self._get_playlist_name_from_ldb(detected_pid)
-            cached_name = ldb_name or self.context_cache.get(pl_ctx_uri, ("", []))[0]
-
-            with self._lock:
-                self.context_uri = pl_ctx_uri
-                if is_valid_name(cached_name):
-                    self.context_name = cached_name
-                elif not is_valid_name(self.context_name):
-                    self.context_name = album if is_valid_name(album) else ""
-                self.all_context_tracks = fresh_tracks
-                self.last_valid_idx = fresh_idx if fresh_idx >= 0 else 0
-                self.current_track = {
-                    "title": title,
-                    "artist": artist,
-                    "uri": uri,
-                    "track_num": fresh_idx + 1 if fresh_idx >= 0 else 1
-                }
-            self.notify(order_changed=True)
-
-            self._sync_context_async(curr_id, title, artist, album)
-            if fresh_idx >= 0:
-                self._resolve_missing_tracks_async(fresh_idx)
-            return
-
-        # Case C: Context detected from Spotify context_player_state_restore
+        # Check active container context from Spotify's context_player_state_restore:
         detected_ctx = self._detect_active_context_uri()
         if detected_ctx:
-            if detected_ctx.startswith("spotify:playlist:"):
-                new_pid = detected_ctx.split(":")[-1]
-                fresh_tracks = self._extract_playlist_from_ldb(new_pid)
-                if fresh_tracks:
-                    fresh_idx = -1
-                    for idx, t in enumerate(fresh_tracks):
-                        if (curr_id and t["tid"] == curr_id) or (t.get("title", "").strip().lower() == norm_title):
-                            fresh_idx = idx
-                            t["title"] = title
-                            t["artist"] = artist
-                            break
-                    pl_name = self._get_playlist_name_from_ldb(new_pid)
-                    with self._lock:
-                        self.context_uri = detected_ctx
-                        if is_valid_name(pl_name):
-                            self.context_name = pl_name
-                        self.all_context_tracks = fresh_tracks
-                        self.last_valid_idx = fresh_idx if fresh_idx >= 0 else 0
-                        self.current_track = {
-                            "title": title,
-                            "artist": artist,
-                            "uri": uri,
-                            "album": album,
-                            "track_num": fresh_idx + 1 if fresh_idx >= 0 else 1
-                        }
-                    self.notify(order_changed=True)
-                    self._sync_context_async(curr_id, title, artist, album)
-                    if fresh_idx >= 0:
-                        self._resolve_missing_tracks_async(fresh_idx)
-                    return
-                else:
-                    name, emb_tracks = self._fetch_embed_tracks(detected_ctx)
+            if detected_ctx.startswith("spotify:track:"):
+                # Track or single played directly (not from a playlist).
+                # Fetch track's album to get full album tracks if it's an album,
+                # or single track if it's a single release.
+                if curr_id and is_valid_name(album):
+                    name, emb_tracks, alb_id = self._fetch_album_for_track(curr_id)
                     if emb_tracks:
                         fresh_idx = -1
                         for idx, t in enumerate(emb_tracks):
-                            if (curr_id and t["tid"] == curr_id) or (t.get("title", "").strip().lower() == norm_title):
+                            if (curr_id and t.get("tid") == curr_id) or (t.get("title", "").strip().lower() == norm_title):
                                 fresh_idx = idx
                                 break
                         with self._lock:
-                            self.context_uri = detected_ctx
-                            if is_valid_name(name):
-                                self.context_name = name
+                            self.context_uri = f"spotify:album:{alb_id}" if alb_id else f"spotify:album:{curr_id}"
+                            self.context_name = name or album or title
                             self.all_context_tracks = emb_tracks
                             self.last_valid_idx = fresh_idx if fresh_idx >= 0 else 0
                             self.current_track = {
@@ -597,7 +555,80 @@ class QueueManager:
                             }
                         self.notify(order_changed=True)
                         return
-            elif detected_ctx.startswith("spotify:album:") and not self.all_context_tracks:
+                # Fallback if album couldn't be fetched
+                single_t = {
+                    "track_num": 1,
+                    "title": title,
+                    "artist": artist,
+                    "uri": uri,
+                    "album": album,
+                    "tid": curr_id
+                }
+                with self._lock:
+                    self.context_uri = detected_ctx
+                    self.context_name = album if is_valid_name(album) else (title if is_valid_name(title) else _("single"))
+                    self.all_context_tracks = [single_t]
+                    self.last_valid_idx = 0
+                    self.current_track = single_t
+                self.notify(order_changed=True)
+                return
+
+            elif detected_ctx.startswith("spotify:playlist:"):
+                new_pid = detected_ctx.split(":")[-1]
+                fresh_tracks = self._extract_playlist_from_ldb(new_pid)
+                if fresh_tracks:
+                    fresh_idx = -1
+                    for idx, t in enumerate(fresh_tracks):
+                        if (curr_id and t["tid"] == curr_id) or (t.get("title", "").strip().lower() == norm_title):
+                            fresh_idx = idx
+                            t["title"] = title
+                            t["artist"] = artist
+                            break
+                    if fresh_idx >= 0:
+                        pl_name = self._get_playlist_name_from_ldb(new_pid)
+                        with self._lock:
+                            self.context_uri = detected_ctx
+                            if is_valid_name(pl_name):
+                                self.context_name = pl_name
+                            self.all_context_tracks = fresh_tracks
+                            self.last_valid_idx = fresh_idx
+                            self.current_track = {
+                                "title": title,
+                                "artist": artist,
+                                "uri": uri,
+                                "album": album,
+                                "track_num": fresh_idx + 1
+                            }
+                        self.notify(order_changed=True)
+                        self._sync_context_async(curr_id, title, artist, album)
+                        self._resolve_missing_tracks_async(fresh_idx)
+                        return
+                else:
+                    name, emb_tracks = self._fetch_embed_tracks(detected_ctx)
+                    if emb_tracks:
+                        fresh_idx = -1
+                        for idx, t in enumerate(emb_tracks):
+                            if (curr_id and t["tid"] == curr_id) or (t.get("title", "").strip().lower() == norm_title):
+                                fresh_idx = idx
+                                break
+                        if fresh_idx >= 0:
+                            with self._lock:
+                                self.context_uri = detected_ctx
+                                if is_valid_name(name):
+                                    self.context_name = name
+                                self.all_context_tracks = emb_tracks
+                                self.last_valid_idx = fresh_idx
+                                self.current_track = {
+                                    "title": title,
+                                    "artist": artist,
+                                    "uri": uri,
+                                    "album": album,
+                                    "track_num": fresh_idx + 1
+                                }
+                            self.notify(order_changed=True)
+                            return
+
+            elif detected_ctx.startswith("spotify:album:"):
                 name, emb_tracks = self._fetch_embed_tracks(detected_ctx)
                 if emb_tracks:
                     fresh_idx = -1
@@ -605,33 +636,34 @@ class QueueManager:
                         if (curr_id and t["tid"] == curr_id) or (t.get("title", "").strip().lower() == norm_title):
                             fresh_idx = idx
                             break
-                    with self._lock:
-                        self.context_uri = detected_ctx
-                        self.context_name = name or album or "Альбом"
-                        self.all_context_tracks = emb_tracks
-                        self.last_valid_idx = fresh_idx if fresh_idx >= 0 else 0
-                        self.current_track = {
-                            "title": title,
-                            "artist": artist,
-                            "uri": uri,
-                            "album": album,
-                            "track_num": fresh_idx + 1 if fresh_idx >= 0 else 1
-                        }
-                    self.notify(order_changed=True)
-                    return
+                    if fresh_idx >= 0:
+                        with self._lock:
+                            self.context_uri = detected_ctx
+                            self.context_name = name or album or "Альбом"
+                            self.all_context_tracks = emb_tracks
+                            self.last_valid_idx = fresh_idx
+                            self.current_track = {
+                                "title": title,
+                                "artist": artist,
+                                "uri": uri,
+                                "album": album,
+                                "track_num": fresh_idx + 1
+                            }
+                        self.notify(order_changed=True)
+                        return
 
-        # Case D: Try fetching album tracks for track (only when no active playlist is loaded)
-        if not self.all_context_tracks and curr_id and is_valid_name(album):
-            name, emb_tracks = self._fetch_album_for_track(curr_id)
+        # Case B: Try fetching album tracks for track (handles full albums as well as single releases)
+        if curr_id and is_valid_name(album):
+            name, emb_tracks, alb_id = self._fetch_album_for_track(curr_id)
             if emb_tracks:
                 fresh_idx = -1
                 for idx, t in enumerate(emb_tracks):
-                    if (curr_id and t["tid"] == curr_id) or (t.get("title", "").strip().lower() == norm_title):
+                    if (curr_id and t.get("tid") == curr_id) or (t.get("title", "").strip().lower() == norm_title):
                         fresh_idx = idx
                         break
                 with self._lock:
-                    self.context_uri = f"spotify:album:{curr_id}"
-                    self.context_name = name or album
+                    self.context_uri = f"spotify:album:{alb_id}" if alb_id else f"spotify:album:{curr_id}"
+                    self.context_name = name or album or title
                     self.all_context_tracks = emb_tracks
                     self.last_valid_idx = fresh_idx if fresh_idx >= 0 else 0
                     self.current_track = {
@@ -644,21 +676,85 @@ class QueueManager:
                 self.notify(order_changed=True)
                 return
 
-        # Case E: Standalone single track fallback (preserve existing playlist if present)
-        with self._lock:
-            track_num = (self.last_valid_idx + 1) if getattr(self, "last_valid_idx", -1) >= 0 else 1
-            self.current_track = {
+        # Case C: If track is a single and album couldn't be fetched, maintain clean 1-track single context
+        if is_single:
+            single_t = {
+                "track_num": 1,
                 "title": title,
                 "artist": artist,
                 "uri": uri,
                 "album": album,
-                "track_num": track_num
+                "tid": curr_id
             }
-            if not self.all_context_tracks and not is_valid_name(self.context_name) and is_valid_name(album):
-                self.context_name = album
-        self.notify()
-        if not self.all_context_tracks:
-            self._sync_context_async(curr_id, title, artist, album)
+            with self._lock:
+                self.context_uri = f"spotify:track:{curr_id}" if curr_id else uri
+                self.context_name = album if is_valid_name(album) else (title if is_valid_name(title) else _("single"))
+                self.all_context_tracks = [single_t]
+                self.last_valid_idx = 0
+                self.current_track = {
+                    "title": title,
+                    "artist": artist,
+                    "uri": uri,
+                    "album": album,
+                    "track_num": 1
+                }
+            self.notify(order_changed=True)
+            return
+
+        # Case D: Check if track belongs to a user playlist
+        detected_pid = self._find_playlist_for_track(curr_id) if curr_id else None
+        if detected_pid:
+            fresh_tracks = self._extract_playlist_from_ldb(detected_pid)
+            fresh_idx = -1
+            for idx, t in enumerate(fresh_tracks):
+                if (curr_id and t["tid"] == curr_id) or (t.get("title", "").strip().lower() == norm_title):
+                    fresh_idx = idx
+                    t["title"] = title
+                    t["artist"] = artist
+                    break
+
+            if fresh_idx >= 0:
+                pl_ctx_uri = f"spotify:playlist:{detected_pid}"
+                ldb_name = self._get_playlist_name_from_ldb(detected_pid)
+                cached_name = ldb_name or self.context_cache.get(pl_ctx_uri, ("", []))[0]
+
+                with self._lock:
+                    self.context_uri = pl_ctx_uri
+                    if is_valid_name(cached_name):
+                        self.context_name = cached_name
+                    elif not is_valid_name(self.context_name):
+                        self.context_name = album if is_valid_name(album) else ""
+                    self.all_context_tracks = fresh_tracks
+                    self.last_valid_idx = fresh_idx
+                    self.current_track = {
+                        "title": title,
+                        "artist": artist,
+                        "uri": uri,
+                        "track_num": fresh_idx + 1
+                    }
+                self.notify(order_changed=True)
+
+                self._sync_context_async(curr_id, title, artist, album)
+                self._resolve_missing_tracks_async(fresh_idx)
+                return
+
+        # Case E: Standalone single track fallback
+        single_t = {
+            "track_num": 1,
+            "title": title,
+            "artist": artist,
+            "uri": uri,
+            "album": album,
+            "tid": curr_id
+        }
+        with self._lock:
+            self.context_uri = f"spotify:track:{curr_id}" if curr_id else ""
+            self.context_name = album if is_valid_name(album) else (title if is_valid_name(title) else _("single"))
+            self.all_context_tracks = [single_t]
+            self.last_valid_idx = 0
+            self.current_track = single_t
+        self.notify(order_changed=True)
+        return
 
     def _extract_id(self, uri):
         if not uri:
@@ -1112,13 +1208,15 @@ class QueueManager:
 
                 # Fallback only when NO context is active at all
                 if track_id:
-                    album_name, album_tracks = self._fetch_album_for_track(track_id)
+                    album_name, album_tracks, alb_id = self._fetch_album_for_track(track_id)
                     for idx, t in enumerate(album_tracks):
                         t["track_num"] = idx + 1
                     with self._lock:
                         cand = album_name or album
                         if is_valid_name(cand):
                             self.context_name = cand
+                        if alb_id:
+                            self.context_uri = f"spotify:album:{alb_id}"
                         if album_tracks:
                             self.all_context_tracks = album_tracks
                     GLib.idle_add(self.notify)
@@ -1150,7 +1248,7 @@ class QueueManager:
                         val, _ = decode_varint(c, p + 1)
                         if 1700000000000 <= val <= 1850000000000:
                             chunk = c[p:min(len(c), p + 400)]
-                            m = re.search(rb"context_uri[^\x00]*?(spotify:(?:playlist|album|collection:tracks|artist):[a-zA-Z0-9:]+)", chunk)
+                            m = re.search(rb"context_uri[^\x00]*?(spotify:(?:playlist|album|collection:tracks|artist|track):[a-zA-Z0-9:]+)", chunk)
                             if m and val > best_ts:
                                 cand = m.group(1).decode()
                                 best_ts = val
@@ -1163,20 +1261,11 @@ class QueueManager:
             except Exception as e:
                 print(f"Error reading context_player_state_restore: {e}")
 
-        for f in sorted(glob.glob(os.path.expanduser("~/.cache/spotify/Browser/Local Storage/leveldb/*.log")),
-                        key=os.path.getmtime, reverse=True):
-            try:
-                with open(f, "rb") as fp:
-                    c = fp.read()
-                playlists = re.findall(rb"spotify:playlist:([a-zA-Z0-9]{22})", c)
-                for p in reversed(playlists):
-                    pid = p.decode()
-                    return f"spotify:playlist:{pid}"
-            except Exception:
-                pass
         return None
 
     def _fetch_embed_tracks(self, context_uri):
+        if context_uri in self.context_cache:
+            return self.context_cache[context_uri]
         try:
             parts = context_uri.split(":")
             ctype, cid = parts[1], parts[2]
@@ -1210,12 +1299,18 @@ class QueueManager:
                             "uri": t.get("uri", ""),
                             "tid": tid
                         })
+                    self.context_cache[context_uri] = (name, res)
                     return name, res
         except Exception as e:
             print(f"Failed to fetch embed tracks for {context_uri}: {e}")
         return "", []
 
     def _fetch_album_for_track(self, track_id):
+        if not track_id:
+            return "", [], ""
+        cache_key = f"track_album:{track_id}"
+        if cache_key in self.context_cache:
+            return self.context_cache[cache_key]
         try:
             url = f"https://open.spotify.com/track/{track_id}"
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
@@ -1224,7 +1319,14 @@ class QueueManager:
                 m = re.search(r"/album/([a-zA-Z0-9]{22})", html)
                 if m:
                     album_id = m.group(1)
-                    return self._fetch_embed_tracks(f"spotify:album:{album_id}")
+                    name, tracks = self._fetch_embed_tracks(f"spotify:album:{album_id}")
+                    if tracks:
+                        self.context_cache[cache_key] = (name, tracks, album_id)
+                        for t in tracks:
+                            tid = t.get("tid")
+                            if tid:
+                                self.context_cache[f"track_album:{tid}"] = (name, tracks, album_id)
+                        return name, tracks, album_id
         except Exception as e:
             print(f"Failed to fetch album for track {track_id}: {e}")
-        return "", []
+        return "", [], ""
