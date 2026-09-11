@@ -7,6 +7,7 @@ import ctypes
 import subprocess
 from datetime import timedelta
 import random
+import threading
 
 import gi
 gi.require_version('Gtk', '4.0')
