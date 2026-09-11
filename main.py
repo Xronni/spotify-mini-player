@@ -437,7 +437,7 @@ class SpotifyMiniWindow(Gtk.Window):
                     data = json.load(f)
                     self.saved_x = data.get("x")
                     self.saved_y = data.get("y")
-                    self.is_pinned = data.get("pinned", False)
+                    self.is_pinned = False  # Reset pin state on restart as requested
                     self.user_shuffle = data.get("user_shuffle", False)
             except Exception as e:
                 print(f"Failed to load config: {e}")
@@ -447,7 +447,7 @@ class SpotifyMiniWindow(Gtk.Window):
             data = {
                 "x": self.saved_x,
                 "y": self.saved_y,
-                "pinned": self.is_pinned,
+                "pinned": False,  # Always reset pin state across restarts
                 "user_shuffle": getattr(self, "user_shuffle", False)
             }
             with open(CONFIG_FILE, "w") as f:
@@ -715,6 +715,13 @@ class SpotifyMiniWindow(Gtk.Window):
         self.queue_spinner.set_visible(False)
         q_header.append(self.queue_spinner)
 
+        # Manual queue refresh button
+        self.q_refresh_btn = Gtk.Button.new_from_icon_name("view-refresh-symbolic")
+        self.q_refresh_btn.add_css_class("icon-btn")
+        self.q_refresh_btn.set_tooltip_text(t("refresh_queue"))
+        self.q_refresh_btn.connect("clicked", self._on_user_refresh_queue_clicked)
+        q_header.append(self.q_refresh_btn)
+
         self.q_close_btn = Gtk.Button.new_from_icon_name("pan-up-symbolic")
         self.q_close_btn.add_css_class("icon-btn")
         self.q_close_btn.set_tooltip_text(t("collapse_queue"))
@@ -947,6 +954,26 @@ class SpotifyMiniWindow(Gtk.Window):
             self.queue_revealer.set_reveal_child(False)
             if not self.is_pinned and not self.is_hovered:
                 self._schedule_hide(3500)
+
+    def _on_user_refresh_queue_clicked(self, *args):
+        self.show_queue_loading(duration_ms=1500)
+        self.show_osd(4500, force=True)
+
+        def _do_refresh():
+            try:
+                self.queue_mgr.force_refresh_context(
+                    title=self.mpris.title,
+                    artist=self.mpris.artist,
+                    uri=self.mpris.track_id,
+                    album=self.mpris.album
+                )
+            except Exception as e:
+                print(f"Error during manual queue refresh: {e}")
+            GLib.idle_add(lambda: self._rebuild_queue_ui(order_changed=True))
+            GLib.timeout_add(120, self._scroll_to_current_track)
+
+        t = threading.Thread(target=_do_refresh, daemon=True)
+        t.start()
 
     def _set_switching_track(self, uri=None, duration_ms=3500):
         if getattr(self, "_switching_timer_id", None):
@@ -1820,6 +1847,8 @@ class SpotifyMiniWindow(Gtk.Window):
         self.prev_btn.set_tooltip_text(t("prev_track"))
         self.play_btn.set_tooltip_text(t("play_pause"))
         self.next_btn.set_tooltip_text(t("next_track"))
+        if hasattr(self, "q_refresh_btn"):
+            self.q_refresh_btn.set_tooltip_text(t("refresh_queue"))
         if hasattr(self, "q_close_btn"):
             self.q_close_btn.set_tooltip_text(t("collapse_queue"))
         if hasattr(self, "off_title"):

@@ -380,6 +380,34 @@ class QueueManager:
         except Exception as e:
             print(f"Error checking for playlist updates: {e}")
 
+    def force_refresh_context(self, title="", artist="", uri="", album=""):
+        """Forces an immediate re-read of active Spotify context and queue tracks."""
+        active_ctx = self._detect_active_context_uri()
+        if active_ctx and active_ctx in self.context_cache:
+            del self.context_cache[active_ctx]
+        if self.context_uri and self.context_uri in self.context_cache:
+            del self.context_cache[self.context_uri]
+
+        if self.context_uri and self.context_uri.startswith("spotify:playlist:"):
+            pid = self.context_uri.split(":")[-1]
+            self._cached_sort_states.pop(pid, None)
+            self._last_sort_state = None
+
+        t = title or (self.current_track.get("title", "") if self.current_track else "")
+        a = artist or (self.current_track.get("artist", "") if self.current_track else "")
+        u = uri or (self.current_track.get("uri", "") if self.current_track else "")
+        alb = album or (self.current_track.get("album", "") if self.current_track else "")
+
+        curr_id = self._extract_id(u)
+        if curr_id:
+            self.context_cache.pop(f"track_album:{curr_id}", None)
+
+        with self._lock:
+            self.context_uri = ""
+            self.all_context_tracks = []
+
+        self.update_current_track(t, a, u, alb)
+
     def _apply_fresh_tracks(self, fresh_tracks, order_changed=True):
         for t in fresh_tracks:
             tid = t.get("tid")

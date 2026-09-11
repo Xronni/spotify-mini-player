@@ -43,6 +43,7 @@ MESSAGES = {
         "repeat_track": "Repeat: Track",
         "updating": "Updating queue...",
         "single": "Single",
+        "refresh_queue": "Refresh queue",
     },
     "ru": {
         "queue_title": "Очередь воспроизведения",
@@ -69,9 +70,9 @@ MESSAGES = {
         "volume": "Громкость: {vol}%",
         "offline_title": "Spotify не запущен",
         "launch_spotify": "Запустить Spotify",
-        "mute_unmute": "Отключить / Включить звук",
+        "mute_unmute": "Вкл / Выкл звук",
         "spotify_volume": "Громкость Spotify",
-        "focus_spotify": "Нажмите, чтобы открыть Spotify",
+        "focus_spotify": "Нажмите, чтобы развернуть Spotify",
         "shuffle_enabled": "Перемешивание: Вкл",
         "shuffle_disabled": "Перемешивание: Выкл",
         "repeat_none": "Повтор: Выкл",
@@ -79,6 +80,7 @@ MESSAGES = {
         "repeat_track": "Повтор: Трек",
         "updating": "Обновление очереди...",
         "single": "Сингл",
+        "refresh_queue": "Обновить очередь",
     },
     "de": {
         "queue_title": "Warteschlange",
@@ -115,6 +117,7 @@ MESSAGES = {
         "repeat_track": "Wiederholen: Titel",
         "updating": "Warteschlange wird aktualisiert...",
         "single": "Single",
+        "refresh_queue": "Warteschlange aktualisieren",
     },
     "es": {
         "queue_title": "Cola de reproducción",
@@ -151,6 +154,7 @@ MESSAGES = {
         "repeat_track": "Repetir: Canción",
         "updating": "Actualizando cola...",
         "single": "Sencillo",
+        "refresh_queue": "Actualizar cola",
     },
     "fr": {
         "queue_title": "File d'attente",
@@ -187,6 +191,7 @@ MESSAGES = {
         "repeat_track": "Répéter: Titre",
         "updating": "Mise à jour de la file...",
         "single": "Single",
+        "refresh_queue": "Actualiser la file d'attente",
     }
 }
 
