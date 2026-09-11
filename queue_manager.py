@@ -296,7 +296,8 @@ class QueueManager:
                 return self.context_name
 
         # 2. Try detecting active context from restore state or LevelDB
-        detected = self._detect_active_context_uri()
+        curr_id = self._extract_id(self.current_track.get("uri")) if self.current_track else None
+        detected = self._detect_active_context_uri(curr_id)
         if detected:
             if detected.startswith("spotify:playlist:"):
                 pid = detected.split(":")[-1]
@@ -325,16 +326,21 @@ class QueueManager:
             return
         self._last_update_check_time = now
 
-        detected = self._detect_active_context_uri()
+        curr_id = self._extract_id(self.current_track.get("uri")) if self.current_track else None
+        detected = self._detect_active_context_uri(curr_id)
         if detected and self.context_uri and detected != self.context_uri:
-            if self.current_track:
-                self.update_current_track(
-                    self.current_track.get("title", ""),
-                    self.current_track.get("artist", ""),
-                    self.current_track.get("uri", ""),
-                    self.current_track.get("album", "")
-                )
-            return
+            # If playing a playlist, a track-level detected URI or track being in current playlist must NOT trigger context reset:
+            if self.context_uri.startswith("spotify:playlist:") and (detected.startswith("spotify:track:") or (self.current_track and self._find_track_idx(self.current_track.get("uri", ""), self.current_track.get("title", "")) >= 0)):
+                pass
+            else:
+                if self.current_track:
+                    self.update_current_track(
+                        self.current_track.get("title", ""),
+                        self.current_track.get("artist", ""),
+                        self.current_track.get("uri", ""),
+                        self.current_track.get("album", "")
+                    )
+                return
 
         if not self.context_uri or not self.context_uri.startswith("spotify:playlist:"):
             return
@@ -382,7 +388,13 @@ class QueueManager:
 
     def force_refresh_context(self, title="", artist="", uri="", album=""):
         """Forces an immediate re-read of active Spotify context and queue tracks."""
-        active_ctx = self._detect_active_context_uri()
+        t = title or (self.current_track.get("title", "") if self.current_track else "")
+        a = artist or (self.current_track.get("artist", "") if self.current_track else "")
+        u = uri or (self.current_track.get("uri", "") if self.current_track else "")
+        alb = album or (self.current_track.get("album", "") if self.current_track else "")
+        curr_id = self._extract_id(u)
+
+        active_ctx = self._detect_active_context_uri(curr_id)
         if active_ctx and active_ctx in self.context_cache:
             del self.context_cache[active_ctx]
         if self.context_uri and self.context_uri in self.context_cache:
@@ -392,13 +404,6 @@ class QueueManager:
             pid = self.context_uri.split(":")[-1]
             self._cached_sort_states.pop(pid, None)
             self._last_sort_state = None
-
-        t = title or (self.current_track.get("title", "") if self.current_track else "")
-        a = artist or (self.current_track.get("artist", "") if self.current_track else "")
-        u = uri or (self.current_track.get("uri", "") if self.current_track else "")
-        alb = album or (self.current_track.get("album", "") if self.current_track else "")
-
-        curr_id = self._extract_id(u)
         if curr_id:
             self.context_cache.pop(f"track_album:{curr_id}", None)
 
@@ -514,16 +519,27 @@ class QueueManager:
             norm_a.endswith(" (single)")
         ))
 
-        detected_ctx = self._detect_active_context_uri()
+        detected_ctx = self._detect_active_context_uri(curr_id)
 
         # Determine whether the playback context has changed
         context_has_changed = False
         if detected_ctx:
-            if not self.context_uri or detected_ctx != self.context_uri:
+            if not self.context_uri:
                 context_has_changed = True
+            elif detected_ctx != self.context_uri:
+                # If we are currently playing a playlist and current track is inside it:
+                if self.context_uri.startswith("spotify:playlist:") and self._find_track_idx(uri, title) >= 0:
+                    if detected_ctx.startswith("spotify:track:"):
+                        context_has_changed = False
+                    elif detected_ctx.startswith("spotify:playlist:"):
+                        context_has_changed = True
+                    elif detected_ctx.startswith("spotify:album:"):
+                        context_has_changed = True
+                else:
+                    context_has_changed = True
 
         # If previous context was a single (1 track), and incoming track has an album and is not a single:
-        if len(self.all_context_tracks) <= 1 and is_valid_name(album) and not is_single:
+        if len(self.all_context_tracks) <= 1 and not (self.context_uri and self.context_uri.startswith("spotify:playlist:")) and is_valid_name(album) and not is_single:
             context_has_changed = True
 
         # If previous context was an album, and MPRIS reports a different album name:
@@ -1162,7 +1178,7 @@ class QueueManager:
                 if self.context_uri and self.context_uri.startswith("spotify:playlist:"):
                     active_ctx = self.context_uri
                 else:
-                    active_ctx = self._detect_active_context_uri()
+                    active_ctx = self._detect_active_context_uri(track_id)
 
                 if active_ctx and active_ctx.startswith("spotify:playlist:"):
                     playlist_id = active_ctx.split(":")[-1]
@@ -1268,7 +1284,7 @@ class QueueManager:
         t = threading.Thread(target=worker, daemon=True)
         t.start()
 
-    def _detect_active_context_uri(self):
+    def _detect_active_context_uri(self, current_track_id=None):
         """Inspects Spotify's local context_player_state_restore by timestamp,
         finding the most recently active context."""
         files = glob.glob(os.path.expanduser("~/.cache/spotify/Users/*-user/context_player_state_restore"))
@@ -1276,8 +1292,10 @@ class QueueManager:
             try:
                 with open(files[0], "rb") as fp:
                     c = fp.read()
-                best_ts = 0
-                best_ctx = None
+                best_container_ts = 0
+                best_container_ctx = None
+                best_track_ts = 0
+                best_track_ctx = None
                 pos = 0
                 while pos < len(c):
                     p = c.find(b"\x08", pos)
@@ -1288,17 +1306,62 @@ class QueueManager:
                         if 1700000000000 <= val <= 1850000000000:
                             chunk = c[p:min(len(c), p + 400)]
                             m = re.search(rb"context_uri[^\x00]*?(spotify:(?:collection:tracks|(?:playlist|album|artist|track):[a-zA-Z0-9:]+))", chunk)
-                            if m and val > best_ts:
+                            if m:
                                 cand = m.group(1).decode()
-                                best_ts = val
-                                best_ctx = cand
+                                if cand.startswith("spotify:track:"):
+                                    if val > best_track_ts:
+                                        best_track_ts = val
+                                        best_track_ctx = cand
+                                else:
+                                    if val > best_container_ts:
+                                        best_container_ts = val
+                                        best_container_ctx = cand
                     except Exception:
                         pass
                     pos = p + 1
-                if best_ctx:
-                    return best_ctx
+
+                tid = current_track_id
+                if not tid and self.current_track:
+                    tid = self._extract_id(self.current_track.get("uri"))
+
+                if best_container_ctx:
+                    # If best container is a playlist, verify if current track belongs to it
+                    if best_container_ctx.startswith("spotify:playlist:"):
+                        pid = best_container_ctx.split(":")[-1]
+                        if tid:
+                            if self.context_uri == best_container_ctx and any(t.get("tid") == tid for t in self.all_context_tracks):
+                                return best_container_ctx
+                            pl_tracks = self._extract_playlist_from_ldb(pid)
+                            if pl_tracks and any(t.get("tid") == tid for t in pl_tracks):
+                                return best_container_ctx
+                            # If track is NOT in this playlist, but a standalone track has a significantly newer timestamp (>1 min):
+                            if best_track_ctx and best_track_ts > best_container_ts + 60000:
+                                return best_track_ctx
+                        return best_container_ctx
+                    return best_container_ctx
+
+                if best_track_ctx:
+                    return best_track_ctx
             except Exception as e:
                 print(f"Error reading context_player_state_restore: {e}")
+
+        # Fallback to finding playlist in LevelDB containing current track
+        tid = current_track_id or (self._extract_id(self.current_track.get("uri")) if self.current_track else None)
+        if tid:
+            pid = self._find_playlist_for_track(tid)
+            if pid:
+                return f"spotify:playlist:{pid}"
+
+        for f in sorted(glob.glob(os.path.expanduser("~/.cache/spotify/Browser/Local Storage/leveldb/*.log")),
+                        key=os.path.getmtime, reverse=True):
+            try:
+                with open(f, "rb") as fp:
+                    c = fp.read()
+                playlists = re.findall(rb"spotify:playlist:[a-zA-Z0-9]{22}", c)
+                if playlists:
+                    return playlists[-1].decode()
+            except Exception:
+                pass
 
         return None
 
