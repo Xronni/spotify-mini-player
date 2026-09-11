@@ -431,35 +431,6 @@ class QueueManager:
                     self.last_valid_idx = new_idx
         self.notify(order_changed=order_changed)
 
-    def _find_playlist_for_track(self, track_id):
-        """Quickly scans local LevelDB to find which USER playlist slice contains track_id."""
-        if not track_id:
-            return None
-        files = glob.glob(os.path.expanduser("~/.cache/spotify/Users/*-user/primary.ldb/*"))
-        log_files = [f for f in files if f.endswith(".log")]
-        ldb_files = [f for f in files if f.endswith(".ldb")]
-        all_files = sorted(log_files, key=os.path.getmtime, reverse=True) + \
-                    sorted(ldb_files, key=os.path.getmtime, reverse=True)
-        track_bytes = track_id.encode()
-        for fpath in all_files:
-            try:
-                d = read_ldb_clean(fpath)
-                if track_bytes not in d:
-                    continue
-                for m in re.finditer(rb"1!pl#slc#\x27spotify:playlist:([a-zA-Z0-9]{22})#", d):
-                    pid = m.group(1).decode()
-                    # Must have a valid playlist name (exclude empty/corrupt)
-                    name = self._get_playlist_name_from_ldb(pid)
-                    if not name or not is_valid_name(name):
-                        continue
-                    pos = m.start()
-                    next_slice = d.find(b"1!pl#", pos + len(m.group(0)))
-                    chunk = d[pos:next_slice] if next_slice != -1 else d[pos:pos + 400000]
-                    if track_bytes in chunk:
-                        return pid
-            except Exception:
-                pass
-        return None
 
     def update_current_track(self, title, artist, uri, album=""):
         if not title:
@@ -1285,13 +1256,32 @@ class QueueManager:
         t.start()
 
     def _detect_active_context_uri(self, current_track_id=None):
-        """Inspects Spotify's local context_player_state_restore by timestamp,
-        finding the most recently active context."""
+        """Inspects Spotify's local context_player_state_restore,
+        finding the authentic active playback context."""
         files = glob.glob(os.path.expanduser("~/.cache/spotify/Users/*-user/context_player_state_restore"))
         if files:
             try:
                 with open(files[0], "rb") as fp:
                     c = fp.read()
+
+                tid = current_track_id
+                if not tid and self.current_track:
+                    tid = self._extract_id(self.current_track.get("uri"))
+
+                # 1. Targeted check: find the active context associated with the current track
+                if tid:
+                    tid_bytes = tid.encode()
+                    pos = c.rfind(tid_bytes)
+                    if pos != -1:
+                        chunk = c[max(0, pos - 1000):min(len(c), pos + 3000)]
+                        m = re.search(rb"(?:context_uri|entity_uri)[^\x00]*?(spotify:(?:collection:tracks|(?:playlist|album|artist):[a-zA-Z0-9:]+))", chunk)
+                        if m:
+                            return m.group(1).decode()
+                        m_track = re.search(rb"context_uri[^\x00]*?(spotify:track:[a-zA-Z0-9:]+)", chunk)
+                        if m_track:
+                            return m_track.group(1).decode()
+
+                # 2. General scan: find all context_uri and entity_uri entries by timestamp
                 best_container_ts = 0
                 best_container_ctx = None
                 best_track_ts = 0
@@ -1304,8 +1294,8 @@ class QueueManager:
                     try:
                         val, _ = decode_varint(c, p + 1)
                         if 1700000000000 <= val <= 1850000000000:
-                            chunk = c[p:min(len(c), p + 400)]
-                            m = re.search(rb"context_uri[^\x00]*?(spotify:(?:collection:tracks|(?:playlist|album|artist|track):[a-zA-Z0-9:]+))", chunk)
+                            chunk = c[p:min(len(c), p + 2500)]
+                            m = re.search(rb"(?:context_uri|entity_uri)[^\x00]*?(spotify:(?:collection:tracks|(?:playlist|album|artist|track):[a-zA-Z0-9:]+))", chunk)
                             if m:
                                 cand = m.group(1).decode()
                                 if cand.startswith("spotify:track:"):
@@ -1320,38 +1310,19 @@ class QueueManager:
                         pass
                     pos = p + 1
 
-                tid = current_track_id
-                if not tid and self.current_track:
-                    tid = self._extract_id(self.current_track.get("uri"))
-
                 if best_container_ctx:
-                    # If best container is a playlist, verify if current track belongs to it
-                    if best_container_ctx.startswith("spotify:playlist:"):
-                        pid = best_container_ctx.split(":")[-1]
-                        if tid:
-                            if self.context_uri == best_container_ctx and any(t.get("tid") == tid for t in self.all_context_tracks):
-                                return best_container_ctx
-                            pl_tracks = self._extract_playlist_from_ldb(pid)
-                            if pl_tracks and any(t.get("tid") == tid for t in pl_tracks):
-                                return best_container_ctx
-                            # If track is NOT in this playlist, but a standalone track has a significantly newer timestamp (>1 min):
-                            if best_track_ctx and best_track_ts > best_container_ts + 60000:
-                                return best_track_ctx
-                        return best_container_ctx
                     return best_container_ctx
-
                 if best_track_ctx:
                     return best_track_ctx
+
+                # 3. Direct raw match from context_player_state_restore
+                all_contexts = re.findall(rb"(?:context_uri|entity_uri)[^\x00]*?(spotify:(?:collection:tracks|(?:playlist|album|artist):[a-zA-Z0-9:]+))", c)
+                if all_contexts:
+                    return all_contexts[-1].decode()
             except Exception as e:
                 print(f"Error reading context_player_state_restore: {e}")
 
-        # Fallback to finding playlist in LevelDB containing current track
-        tid = current_track_id or (self._extract_id(self.current_track.get("uri")) if self.current_track else None)
-        if tid:
-            pid = self._find_playlist_for_track(tid)
-            if pid:
-                return f"spotify:playlist:{pid}"
-
+        # Fallback to LevelDB only if context_player_state_restore is completely absent or empty
         for f in sorted(glob.glob(os.path.expanduser("~/.cache/spotify/Browser/Local Storage/leveldb/*.log")),
                         key=os.path.getmtime, reverse=True):
             try:
