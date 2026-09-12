@@ -373,7 +373,7 @@ class SpotifyMiniWindow(Gtk.Window):
         super().__init__(*args, **kwargs)
 
         self.set_title("Spotify Mini")
-        self.set_default_size(400, 185)
+        self.set_default_size(430, 185)
         self.set_resizable(False)
         self.set_decorated(False)
         self.set_focusable(False)
@@ -513,7 +513,7 @@ class SpotifyMiniWindow(Gtk.Window):
         self.vol_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
         self.vol_scale.set_draw_value(False)
         self.vol_scale.add_css_class("vol-scale")
-        self.vol_scale.set_size_request(64, 16)
+        self.vol_scale.set_size_request(56, 16)
         self.vol_scale.set_hexpand(False)
         self.vol_scale.set_value(70)
         self.vol_scale.set_tooltip_text(t("spotify_volume"))
@@ -538,6 +538,8 @@ class SpotifyMiniWindow(Gtk.Window):
         self.version_btn = Gtk.Button(label=f"v{APP_VERSION} • GitHub")
         self.version_btn.add_css_class("version-link")
         self.version_btn.set_valign(Gtk.Align.CENTER)
+        self.version_btn.set_margin_start(10)
+        self.version_btn.set_margin_end(10)
         self.version_btn.set_cursor_from_name("pointer")
         self.version_btn.set_tooltip_text(f"GitHub: Xronni/spotify-mini-player (v{APP_VERSION})")
         self.version_btn.connect("clicked", open_github_repo)
@@ -914,7 +916,7 @@ class SpotifyMiniWindow(Gtk.Window):
 
     def _on_revealer_revealed_changed(self, revealer, param):
         if not revealer.get_child_revealed() and not self.is_queue_open:
-            self.set_default_size(400, 185)
+            self.set_default_size(430, 185)
 
     def _on_queue_scrolled(self, adj):
         if getattr(self, "_ignore_scroll_event", False):
@@ -1449,7 +1451,40 @@ class SpotifyMiniWindow(Gtk.Window):
         if idx >= 0:
             self._skip_target_idx = idx
             self.queue_mgr.last_valid_idx = idx
-        self.play_track_silent(uri)
+            # Immediately update track preview labels so user sees instant reaction
+            if self.queue_mgr.all_context_tracks and 0 <= idx < len(self.queue_mgr.all_context_tracks):
+                t = self.queue_mgr.all_context_tracks[idx]
+                title = t.get("title")
+                if title:
+                    self.title_label.set_text(title)
+                    self.title_label.set_tooltip_text(title)
+                artist = (t.get("artist") or "").strip()
+                if artist.casefold() == "spotify":
+                    artist = ""
+                album = t.get("album") or ""
+                artist_text = format_artist_and_album(artist, album, t.get("title") or "")
+                if artist_text:
+                    self.artist_label.set_text(artist_text)
+                    self.artist_label.set_tooltip_text(artist_text)
+                self.scale.set_value(0)
+                self.pos_label.set_text("00:00")
+            self._rebuild_queue_ui(order_changed=False)
+
+        # Cancel any pending queue click debounce
+        if getattr(self, "_queue_click_debounce_id", None):
+            try:
+                GLib.source_remove(self._queue_click_debounce_id)
+            except Exception:
+                pass
+            self._queue_click_debounce_id = None
+
+        def do_play_queue_track():
+            self._queue_click_debounce_id = None
+            self.play_track_silent(uri)
+            return False
+
+        # Debounce by 180ms to prevent lag from rapid clicks
+        self._queue_click_debounce_id = GLib.timeout_add(180, do_play_queue_track)
 
     def _fire_rebuild(self):
         """Called by debounce timer — runs the actual rebuild with accumulated flags."""

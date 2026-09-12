@@ -492,27 +492,53 @@ class QueueManager:
 
         detected_ctx = self._detect_active_context_uri(curr_id, album)
 
+        track_in_current_context = (self._find_track_idx(uri, title) >= 0) if self.all_context_tracks else False
+
         # Determine whether the playback context has changed
         context_has_changed = False
         if detected_ctx:
             if not self.context_uri:
                 context_has_changed = True
             elif detected_ctx != self.context_uri:
-                # If we are currently playing a playlist and current track is inside it:
-                if self.context_uri.startswith("spotify:playlist:") and self._find_track_idx(uri, title) >= 0:
-                    if detected_ctx.startswith("spotify:track:"):
-                        context_has_changed = False
-                    elif detected_ctx.startswith("spotify:playlist:"):
+                if self.context_uri.startswith("spotify:playlist:"):
+                    # If we are in a playlist and track is in this playlist:
+                    if track_in_current_context:
+                        # Only change context if user explicitly switched to a different PLAYLIST that contains this track
+                        if detected_ctx.startswith("spotify:playlist:"):
+                            new_pid = detected_ctx.split(":")[-1]
+                            cur_pid = self.context_uri.split(":")[-1]
+                            if new_pid != cur_pid:
+                                new_tracks = self._extract_playlist_from_ldb(new_pid)
+                                context_has_changed = bool(new_tracks and any(t.get("tid") == curr_id for t in new_tracks))
+                            else:
+                                context_has_changed = False
+                        else:
+                            context_has_changed = False
+                    else:
                         context_has_changed = True
-                    elif detected_ctx.startswith("spotify:album:"):
+                elif self.context_uri.startswith("spotify:album:"):
+                    # If we are in an album and track is in this album:
+                    if track_in_current_context or (is_valid_name(album) and is_valid_name(self.context_name) and album.strip().casefold() == self.context_name.strip().casefold()):
+                        # Only change context if a genuine playlist or a genuinely different album containing this track was detected
+                        if detected_ctx.startswith("spotify:playlist:"):
+                            new_pid = detected_ctx.split(":")[-1]
+                            new_tracks = self._extract_playlist_from_ldb(new_pid)
+                            context_has_changed = bool(new_tracks and any(t.get("tid") == curr_id for t in new_tracks))
+                        elif detected_ctx.startswith("spotify:album:"):
+                            if is_valid_name(album) and is_valid_name(self.context_name) and album.strip().casefold() != self.context_name.strip().casefold():
+                                context_has_changed = True
+                            else:
+                                context_has_changed = False
+                        else:
+                            context_has_changed = False
+                    else:
                         context_has_changed = True
                 else:
                     context_has_changed = True
         else:
-            # If no context was detected, but we are currently in a playlist:
-            # If current track is NOT in our active playlist, context has changed:
-            if self.context_uri and self.context_uri.startswith("spotify:playlist:"):
-                if self._find_track_idx(uri, title) < 0:
+            # If no context was detected, but we are in a playlist/album:
+            if self.context_uri and not track_in_current_context:
+                if self.context_uri.startswith("spotify:playlist:") or (self.context_uri.startswith("spotify:album:") and is_valid_name(album) and album.strip().casefold() != (self.context_name or "").strip().casefold()):
                     context_has_changed = True
 
         # If previous context was a single (1 track), and incoming track has an album and is not a single:
@@ -1312,13 +1338,10 @@ class QueueManager:
                     elif cand.startswith("spotify:album:"):
                         aid = cand.split(":")[-1]
                         if current_album and is_valid_name(current_album):
-                            alb_name, _ = self._fetch_embed_tracks(cand)
-                            if alb_name and alb_name.strip().casefold() == current_album.strip().casefold():
-                                return cand
-                        elif tid:
-                            _, tracks = self._fetch_embed_tracks(cand)
-                            if any(t.get("tid") == tid for t in tracks):
-                                return cand
+                            if cand in self.context_cache:
+                                alb_name, _ = self.context_cache[cand]
+                                if alb_name and alb_name.strip().casefold() == current_album.strip().casefold():
+                                    return cand
             except Exception as e:
                 print(f"Error reading primary.ldb logs: {e}")
 
@@ -1368,6 +1391,7 @@ class QueueManager:
                                 return best_container_ctx
                             if best_track_ctx and best_track_ts > best_container_ts + 60000:
                                 return best_track_ctx
+                            return None
                         return best_container_ctx
                     return best_container_ctx
 

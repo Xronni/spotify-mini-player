@@ -362,7 +362,7 @@ class MPRISManager:
         """Tells Spotify to immediately play the specified track URI."""
         if self.player_proxy and uri:
             try:
-                self.player_proxy.call_sync("OpenUri", GLib.Variant("(s)", (uri,)), Gio.DBusCallFlags.NONE, -1, None)
+                self.player_proxy.call("OpenUri", GLib.Variant("(s)", (uri,)), Gio.DBusCallFlags.NONE, 800, None, None)
             except Exception as e:
                 print(f"OpenUri failed: {e}")
 
