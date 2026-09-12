@@ -26,7 +26,7 @@ SPOTIFY_LOGO_PATH = "/usr/share/spotify/icons/spotify-linux-128.png"
 CONFIG_DIR = os.path.expanduser("~/.config/spotify-mini-player")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.2.2"
 GITHUB_REPO_URL = "https://github.com/Xronni/spotify-mini-player"
 
 def open_github_repo(widget=None):
@@ -1096,9 +1096,17 @@ class SpotifyMiniWindow(Gtk.Window):
                 if matched_idx >= 0:
                     base_idx = matched_idx
                 else:
-                    base_idx = getattr(self.queue_mgr, "last_valid_idx", 0)
-                if base_idx < 0 or base_idx >= total:
-                    base_idx = 0
+                    self._set_switching_track(duration_ms=3500)
+                    self._ignore_rewind_until = time.time() + 2.0
+                    self.max_track_pos = 0.0
+                    self.anchor_pos = 0.0
+                    self.anchor_time = time.time()
+                    self.last_sync_pos = 0.0
+                    self.scale.set_value(0)
+                    self.pos_label.set_text("00:00")
+                    self.mpris.next()
+                    self.show_osd(4500, force=True)
+                    return
 
             is_loop = getattr(self.mpris, "loop_status", "Playlist") != "None"
             if base_idx + 1 < total:
@@ -1187,9 +1195,17 @@ class SpotifyMiniWindow(Gtk.Window):
                 if matched_idx >= 0:
                     base_idx = matched_idx
                 else:
-                    base_idx = getattr(self.queue_mgr, "last_valid_idx", 0)
-                if base_idx < 0 or base_idx >= total:
-                    base_idx = 0
+                    self._set_switching_track(duration_ms=3500)
+                    self._ignore_rewind_until = time.time() + 2.0
+                    self.max_track_pos = 0.0
+                    self.anchor_pos = 0.0
+                    self.anchor_time = time.time()
+                    self.last_sync_pos = 0.0
+                    self.scale.set_value(0)
+                    self.pos_label.set_text("00:00")
+                    self.mpris.previous()
+                    self.show_osd(4500, force=True)
+                    return
 
             is_loop = getattr(self.mpris, "loop_status", "Playlist") != "None"
             if base_idx - 1 >= 0:
@@ -2060,6 +2076,11 @@ class SpotifyMiniWindow(Gtk.Window):
 
         all_tracks = self.queue_mgr.all_context_tracks
         if not all_tracks or len(all_tracks) <= 1:
+            return False
+
+        # If current playing track is not in our active queue context, do not hijack!
+        curr_idx = self.queue_mgr._find_track_idx(self.mpris.track_id, self.mpris.title)
+        if curr_idx < 0:
             return False
 
         self._ignore_rewind_until = time.time() + 2.5

@@ -53,14 +53,14 @@
   ```
 
 #### Option A: Install Debian / Ubuntu Package (.deb) — Recommended
-Download `spotify-mini-player_1.2.1_all.deb` from the [Releases page](https://github.com/Xronni/spotify-mini-player/releases/latest) and install:
+Download `spotify-mini-player_1.2.2_all.deb` from the [Releases page](https://github.com/Xronni/spotify-mini-player/releases/latest) and install:
 ```bash
-sudo dpkg -i spotify-mini-player_1.2.1_all.deb
+sudo dpkg -i spotify-mini-player_1.2.2_all.deb
 sudo apt install -f  # automatically install dependencies if needed
 ```
 
 #### Option B: Standalone Archive or Git Clone
-1. Clone the repository or download `spotify-mini-player-v1.2.1-linux-x86_64.tar.gz`:
+1. Clone the repository or download `spotify-mini-player-v1.2.2-linux-x86_64.tar.gz`:
    ```bash
    git clone https://github.com/Xronni/spotify-mini-player.git
    cd spotify-mini-player
@@ -126,14 +126,14 @@ sudo apt install -f  # automatically install dependencies if needed
   ```
 
 #### Вариант А: Установка пакета Debian / Ubuntu (.deb) — Рекомендуется
-Скачайте `spotify-mini-player_1.2.1_all.deb` со страницы [Релизов](https://github.com/Xronni/spotify-mini-player/releases/latest) и выполните:
+Скачайте `spotify-mini-player_1.2.2_all.deb` со страницы [Релизов](https://github.com/Xronni/spotify-mini-player/releases/latest) и выполните:
 ```bash
-sudo dpkg -i spotify-mini-player_1.2.1_all.deb
+sudo dpkg -i spotify-mini-player_1.2.2_all.deb
 sudo apt install -f  # автоматическая установка зависимостей при необходимости
 ```
 
 #### Вариант Б: Портативный запуск или сборка из Git
-1. Клонируйте репозиторий или скачайте архив `spotify-mini-player-v1.2.1-linux-x86_64.tar.gz`:
+1. Клонируйте репозиторий или скачайте архив `spotify-mini-player-v1.2.2-linux-x86_64.tar.gz`:
    ```bash
    git clone https://github.com/Xronni/spotify-mini-player.git
    cd spotify-mini-player
