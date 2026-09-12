@@ -38,6 +38,13 @@ class VisualizerWidget(Gtk.Box):
             else:
                 bar.add_css_class("paused")
 
+    def start(self):
+        self.set_playing(True)
+
+    def stop(self):
+        self.set_playing(False)
+
+
     def _on_tick(self, widget, frame_clock):
         if self.is_playing:
             self.t += 0.055

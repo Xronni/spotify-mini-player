@@ -440,7 +440,7 @@ class SpotifyMiniWindow(Gtk.Window):
         self._rebuild_queue_ui()
 
         # Show initially for 4.5s
-        self.show_osd(duration_ms=4500)
+        self.show_osd(duration_ms=4500, force=True)
 
     def _load_config(self):
         os.makedirs(CONFIG_DIR, exist_ok=True)
@@ -2411,12 +2411,14 @@ class SpotifyMiniWindow(Gtk.Window):
             self.play_btn.set_icon_name("media-playback-pause-symbolic")
             self.play_btn.set_tooltip_text(t("pause"))
             self.play_btn.add_css_class("playing")
-            self.visualizer.start()
+            if hasattr(self, "visualizer"):
+                self.visualizer.set_playing(True)
         else:
             self.play_btn.set_icon_name("media-playback-start-symbolic")
             self.play_btn.set_tooltip_text(t("play"))
             self.play_btn.remove_css_class("playing")
-            self.visualizer.stop()
+            if hasattr(self, "visualizer"):
+                self.visualizer.set_playing(False)
 
         return False
 
@@ -2437,6 +2439,11 @@ class SpotifyMiniApp(Adw.Application):
     def do_command_line(self, command_line):
         options = command_line.get_options_dict()
         self.activate()
+        if not self.win:
+            command_line.set_exit_status(1)
+            command_line.done()
+            return 1
+
         if options.contains("next"):
             GLib.idle_add(self.win.on_user_next_clicked)
             GLib.idle_add(lambda: self.win.show_osd(4500, force=True))
@@ -2477,8 +2484,10 @@ class SpotifyMiniApp(Adw.Application):
             self.hold()
             self.win = SpotifyMiniWindow(application=self)
         else:
-            self.win.show_osd(4500)
+            self.win.show_osd(4500, force=True)
 
 if __name__ == "__main__":
+    GLib.set_prgname("com.github.vibe.spotifymini")
+    GLib.set_application_name("Spotify Mini Player")
     app = SpotifyMiniApp()
     app.run(sys.argv)
