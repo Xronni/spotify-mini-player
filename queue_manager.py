@@ -325,21 +325,17 @@ class QueueManager:
         curr_id = self._extract_id(self.current_track.get("uri")) if self.current_track else None
         current_album = self.current_track.get("album", "") if self.current_track else None
 
-        # Check if current track is already within our active context
-        track_in_ctx = (self._find_track_idx(self.current_track.get("uri", ""), self.current_track.get("title", "")) >= 0) if (self.current_track and self.all_context_tracks) else False
-
-        # Only attempt context re-detection if track is NOT in current context:
-        if not track_in_ctx:
-            detected = self._detect_active_context_uri(curr_id, current_album)
-            if detected and self.context_uri and detected != self.context_uri and not detected.startswith("spotify:track:"):
-                if self.current_track:
-                    self.update_current_track(
-                        self.current_track.get("title", ""),
-                        self.current_track.get("artist", ""),
-                        self.current_track.get("uri", ""),
-                        self.current_track.get("album", "")
-                    )
-                return
+        # Check if active context in Spotify has changed:
+        detected = self._detect_active_context_uri(curr_id, current_album)
+        if detected and self.context_uri and detected != self.context_uri and not detected.startswith("spotify:track:"):
+            if self.current_track:
+                self.update_current_track(
+                    self.current_track.get("title", ""),
+                    self.current_track.get("artist", ""),
+                    self.current_track.get("uri", ""),
+                    self.current_track.get("album", "")
+                )
+            return
 
         if not self.context_uri or not self.context_uri.startswith("spotify:playlist:"):
             return
@@ -498,18 +494,12 @@ class QueueManager:
             if not self.context_uri:
                 context_has_changed = True
             elif detected_ctx != self.context_uri:
-                if self.context_uri.startswith("spotify:playlist:") and track_in_current_context:
-                    # Current track is ALREADY in our active playlist! Never leave active playlist!
-                    context_has_changed = False
-                elif detected_ctx.startswith("spotify:playlist:"):
-                    context_has_changed = True
-                elif detected_ctx.startswith("spotify:album:"):
-                    context_has_changed = True
-                elif detected_ctx.startswith("spotify:collection:tracks"):
-                    context_has_changed = True
-                elif detected_ctx.startswith("spotify:track:"):
-                    # Standalone track URI emitted when Next/Prev or OpenUri is called - do NOT leave active context
-                    context_has_changed = False
+                if detected_ctx.startswith("spotify:track:"):
+                    # Standalone track URI emitted - change context if single or not in current context
+                    if is_single or not track_in_current_context:
+                        context_has_changed = True
+                    else:
+                        context_has_changed = False
                 else:
                     context_has_changed = True
         else:
@@ -1280,13 +1270,6 @@ class QueueManager:
         if not tid and self.current_track:
             tid = self._extract_id(self.current_track.get("uri"))
 
-        # Rule 1: If current track is ALREADY in the active context (playlist or album),
-        # ALWAYS preserve the active context! Never switch away to another context!
-        if tid and self.context_uri and self.all_context_tracks:
-            if any(t.get("tid") == tid for t in self.all_context_tracks):
-                return self.context_uri
-
-        # Rule 2: If tid is missing or unknown, NEVER guess an arbitrary container from old logs!
         if not tid:
             return self.context_uri or None
 
@@ -1296,27 +1279,33 @@ class QueueManager:
         # Spotify Desktop writes playback context changes and playlist views directly to primary.ldb WAL
         ldb_files = sorted(glob.glob(os.path.expanduser("~/.cache/spotify/Users/*-user/primary.ldb/*.log")),
                            key=os.path.getmtime, reverse=True)
+        track_match = None
         if ldb_files:
             try:
                 d = read_ldb_clean(ldb_files[0])
-                chunk = d[-400000:] if len(d) > 400000 else d
+                chunk = d[-1500000:] if len(d) > 1500000 else d
                 
-                # Match genuine Spotify container playback events ONLY (playlist, album, collection, artist)
-                rp_matches = list(re.finditer(rb"#rp#ctx#[^\x00]*?(spotify:(?:collection:tracks|(?:playlist|album|artist):[a-zA-Z0-9]+))", chunk))
+                # Match genuine Spotify container playback events (playlist, album, collection, artist, track)
+                rp_matches = list(re.finditer(rb"#rp#ctx#[^\r\n]{1,80}?(spotify:(?:collection:tracks|(?:playlist|album|artist|track):[a-zA-Z0-9]+))", chunk))
                 
                 seen = set()
                 candidate_containers = []
                 for m in reversed(rp_matches):
                     uri = m.group(1).decode()
-                    if uri not in seen:
-                        seen.add(uri)
-                        candidate_containers.append(uri)
+                    if uri.startswith("spotify:track:"):
+                        cand_tid = uri.split(":")[-1]
+                        if cand_tid == tid and not track_match:
+                            track_match = uri
+                    else:
+                        if uri not in seen:
+                            seen.add(uri)
+                            candidate_containers.append(uri)
 
                 # Check candidate containers from newest to oldest in genuine chronological playback order
                 for cand in candidate_containers:
                     if cand.startswith("spotify:playlist:"):
                         pid = cand.split(":")[-1]
-                        if self.context_uri == cand and any(t.get("tid") == tid for t in self.all_context_tracks):
+                        if self.context_uri == cand and self.all_context_tracks and any(t.get("tid") == tid for t in self.all_context_tracks):
                             return cand
                         if cand in self.context_cache:
                             _, pl_tracks = self.context_cache[cand]
@@ -1335,7 +1324,8 @@ class QueueManager:
                             if emb_tracks and any(t.get("tid") == tid for t in emb_tracks):
                                 return cand
                     elif cand.startswith("spotify:album:"):
-                        aid = cand.split(":")[-1]
+                        if self.context_uri == cand and self.all_context_tracks and any(t.get("tid") == tid for t in self.all_context_tracks):
+                            return cand
                         if cand in self.context_cache:
                             alb_name, alb_tracks = self.context_cache[cand]
                             if alb_tracks and any(t.get("tid") == tid for t in alb_tracks):
@@ -1386,7 +1376,7 @@ class QueueManager:
                 if best_container_ctx and (now_ms - best_container_ts < 3 * 3600 * 1000):
                     if best_container_ctx.startswith("spotify:playlist:"):
                         pid = best_container_ctx.split(":")[-1]
-                        if self.context_uri == best_container_ctx and any(t.get("tid") == tid for t in self.all_context_tracks):
+                        if self.context_uri == best_container_ctx and self.all_context_tracks and any(t.get("tid") == tid for t in self.all_context_tracks):
                             return best_container_ctx
                         if best_container_ctx in self.context_cache:
                             _, pl_tracks = self.context_cache[best_container_ctx]
@@ -1402,8 +1392,9 @@ class QueueManager:
                             name, emb_tracks = self._fetch_embed_tracks(best_container_ctx)
                             if emb_tracks and any(t.get("tid") == tid for t in emb_tracks):
                                 return best_container_ctx
-                        return None
                     elif best_container_ctx.startswith("spotify:album:"):
+                        if self.context_uri == best_container_ctx and self.all_context_tracks and any(t.get("tid") == tid for t in self.all_context_tracks):
+                            return best_container_ctx
                         if best_container_ctx in self.context_cache:
                             alb_name, alb_tracks = self.context_cache[best_container_ctx]
                             if alb_tracks and any(t.get("tid") == tid for t in alb_tracks):
@@ -1416,10 +1407,16 @@ class QueueManager:
                                 return best_container_ctx
                             if current_album and is_valid_name(current_album) and name and name.strip().casefold() == current_album.strip().casefold():
                                 return best_container_ctx
-                        return None
-                    return None
             except Exception as e:
                 print(f"Error reading context_player_state_restore: {e}")
+
+        # 3. Fallback: If track is already within active context tracks, preserve active context
+        if self.context_uri and self.all_context_tracks and any(t.get("tid") == tid for t in self.all_context_tracks):
+            return self.context_uri
+
+        # 4. Fallback to track match if explicitly logged
+        if track_match:
+            return track_match
 
         return None
 
