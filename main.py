@@ -26,6 +26,18 @@ SPOTIFY_LOGO_PATH = "/usr/share/spotify/icons/spotify-linux-128.png"
 CONFIG_DIR = os.path.expanduser("~/.config/spotify-mini-player")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
+APP_VERSION = "1.2.1"
+GITHUB_REPO_URL = "https://github.com/Xronni/spotify-mini-player"
+
+def open_github_repo(widget=None):
+    try:
+        Gio.AppInfo.launch_default_for_uri(GITHUB_REPO_URL, None)
+    except Exception:
+        try:
+            subprocess.Popen(["xdg-open", GITHUB_REPO_URL])
+        except Exception as e:
+            print(f"Failed to open repo URL: {e}")
+
 def format_time(seconds):
     if seconds < 0:
         seconds = 0
@@ -518,10 +530,22 @@ class SpotifyMiniWindow(Gtk.Window):
         left_box.append(vol_box)
         top_bar.append(left_box)
 
-        # Spacer (Grabbable drag area)
-        spacer = Gtk.Box()
-        spacer.set_hexpand(True)
-        top_bar.append(spacer)
+        # Spacers and release version badge (Grabbable drag area)
+        spacer1 = Gtk.Box()
+        spacer1.set_hexpand(True)
+        top_bar.append(spacer1)
+
+        self.version_btn = Gtk.Button(label=f"v{APP_VERSION} • GitHub")
+        self.version_btn.add_css_class("version-link")
+        self.version_btn.set_valign(Gtk.Align.CENTER)
+        self.version_btn.set_cursor_from_name("pointer")
+        self.version_btn.set_tooltip_text(f"GitHub: Xronni/spotify-mini-player (v{APP_VERSION})")
+        self.version_btn.connect("clicked", open_github_repo)
+        top_bar.append(self.version_btn)
+
+        spacer2 = Gtk.Box()
+        spacer2.set_hexpand(True)
+        top_bar.append(spacer2)
 
         # Right Action Buttons (Queue, Pin, Raise, Close)
         right_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
@@ -774,6 +798,14 @@ class SpotifyMiniWindow(Gtk.Window):
         self.launch_btn.add_css_class("launch-btn")
         self.launch_btn.connect("clicked", self._launch_spotify)
         offline_box.append(self.launch_btn)
+
+        self.off_version_btn = Gtk.Button(label=f"v{APP_VERSION} • GitHub")
+        self.off_version_btn.add_css_class("version-link")
+        self.off_version_btn.set_halign(Gtk.Align.CENTER)
+        self.off_version_btn.set_cursor_from_name("pointer")
+        self.off_version_btn.set_tooltip_text(f"GitHub: Xronni/spotify-mini-player (v{APP_VERSION})")
+        self.off_version_btn.connect("clicked", open_github_repo)
+        offline_box.append(self.off_version_btn)
 
         self.stack.add_named(offline_box, "offline")
 

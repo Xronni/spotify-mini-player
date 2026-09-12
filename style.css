@@ -487,3 +487,32 @@ scale.seek-bar:hover slider {
 .launch-btn:hover {
     background-color: #24f06e;
 }
+
+/* Version & Repository Link Badge */
+button.version-link {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    color: rgba(255, 255, 255, 0.45);
+    background-color: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 9999px;
+    padding: 1px 8px;
+    margin: 0 4px;
+    min-height: 20px;
+    min-width: 0;
+    transition: all 180ms ease;
+}
+
+button.version-link:hover {
+    color: #1ed760;
+    background-color: rgba(30, 215, 96, 0.12);
+    border-color: rgba(30, 215, 96, 0.35);
+    box-shadow: 0 0 8px rgba(30, 215, 96, 0.2);
+}
+
+button.version-link:active {
+    color: #ffffff;
+    background-color: rgba(30, 215, 96, 0.25);
+    border-color: rgba(30, 215, 96, 0.6);
+}
