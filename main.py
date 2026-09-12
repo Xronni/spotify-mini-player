@@ -979,14 +979,10 @@ class SpotifyMiniWindow(Gtk.Window):
             GLib.timeout_add(60, self._scroll_to_current_track)
             GLib.timeout_add(180, self._scroll_to_current_track)
             GLib.timeout_add(320, self._scroll_to_current_track)
-            if not self.is_pinned and not self.is_hovered:
-                self._schedule_hide(4500)
         else:
             self.hide_queue_loading()
             self.queue_btn.remove_css_class("queue-active")
             self.queue_revealer.set_reveal_child(False)
-            if not self.is_pinned and not self.is_hovered:
-                self._schedule_hide(3500)
 
     def _on_user_refresh_queue_clicked(self, *args):
         self.show_queue_loading(duration_ms=1500)
@@ -1727,32 +1723,6 @@ class SpotifyMiniWindow(Gtk.Window):
         if getattr(self, "_switching_track", False):
             return True
 
-        sp_on_screen = is_spotify_on_screen() or is_spotify_active()
-
-        if sp_on_screen:
-            # If Spotify desktop is open on screen, hide the mini player (unless user is actively scrubbing or hovering it)
-            if self.get_visible() and not self.is_hovered and not self.is_scrubbing:
-                self._cancel_hide_timer()
-                self._cancel_fade()
-                self._was_pinned_before_spotify = self.is_pinned
-                self._hidden_due_to_spotify = True
-                self.set_visible(False)
-        else:
-            # Spotify desktop is minimized or closed
-            if getattr(self, "_hidden_due_to_spotify", False):
-                self._hidden_due_to_spotify = False
-                was_pinned = getattr(self, "_was_pinned_before_spotify", False)
-                self._was_pinned_before_spotify = False
-                # Reopen ONLY if the mini player was pinned! If not pinned, do not reopen.
-                if self.is_pinned and was_pinned:
-                    self.show_osd(force=True)
-                    self._user_scrolled_queue = False
-                    if self.is_queue_open:
-                        GLib.idle_add(self._scroll_to_current_track)
-                        GLib.timeout_add(60, self._scroll_to_current_track)
-                        GLib.timeout_add(180, self._scroll_to_current_track)
-                        GLib.timeout_add(320, self._scroll_to_current_track)
-
         # If mini player is minimized by window manager or system, unpin it
         surface = self.get_surface()
         if surface and isinstance(surface, Gdk.Toplevel):
@@ -1766,13 +1736,10 @@ class SpotifyMiniWindow(Gtk.Window):
                     self.set_pinned(False)
 
             # Check if pointer physically left the window to fix stuck is_hovered
-            if self.get_visible() and not self.is_pinned:
+            if self.get_visible():
                 pointer_inside = is_pointer_over_window(my_xid, self.get_width(), self.get_height())
-                if not pointer_inside:
-                    if self.is_hovered:
-                        self.is_hovered = False
-                    if not self.hide_timer_id and not self.is_scrubbing and self.get_opacity() > 0.9:
-                        self._schedule_hide(3500)
+                if not pointer_inside and self.is_hovered:
+                    self.is_hovered = False
 
         # Track window position for saving when visible
         if self.get_visible():
@@ -1921,8 +1888,6 @@ class SpotifyMiniWindow(Gtk.Window):
 
     def _on_mouse_leave(self, controller):
         self.is_hovered = False
-        if not self.is_pinned and not self.is_scrubbing:
-            self._schedule_hide(3500)
 
     def _on_scroll_volume(self, controller, dx, dy):
         if self.is_queue_open:
@@ -1963,8 +1928,6 @@ class SpotifyMiniWindow(Gtk.Window):
 
     def _clear_scrubbing(self):
         self.is_scrubbing = False
-        if not self.is_pinned and not self.is_hovered:
-            self._schedule_hide(3500)
         return False
 
     def _is_song_at_end(self):
@@ -2101,10 +2064,6 @@ class SpotifyMiniWindow(Gtk.Window):
         self.show_osd(4500, force=True)
 
     def show_osd(self, duration_ms=4500, force=False):
-        # If user is working actively in Spotify, do NOT pop up unless forced
-        if not force and is_spotify_active():
-            return
-
         self._cancel_fade()
         self.set_opacity(1.0)
         self.set_visible(True)
@@ -2119,15 +2078,11 @@ class SpotifyMiniWindow(Gtk.Window):
         if isinstance(surface, GdkX11.X11Surface):
             xid = surface.get_xid()
             set_window_motif_hints(xid)
-            set_window_always_above(xid, True)
+            set_window_always_above(xid, self.is_pinned)
             if self.saved_x is not None and self.saved_y is not None:
                 move_window_to(xid, self.saved_x, self.saved_y)
             if not is_pointer_over_window(xid, self.get_width(), self.get_height()):
                 self.is_hovered = False
-
-        if not self.is_pinned:
-            if not self.is_hovered and not self.is_scrubbing:
-                self._schedule_hide(duration_ms)
 
         if self.is_queue_open:
             self._user_scrolled_queue = False
@@ -2137,8 +2092,7 @@ class SpotifyMiniWindow(Gtk.Window):
             GLib.timeout_add(320, self._scroll_to_current_track)
 
     def _schedule_hide(self, duration_ms):
-        self._cancel_hide_timer()
-        self.hide_timer_id = GLib.timeout_add(duration_ms, self._on_autohide_timer)
+        pass
 
     def _cancel_hide_timer(self):
         if self.hide_timer_id:
@@ -2151,41 +2105,10 @@ class SpotifyMiniWindow(Gtk.Window):
             self.fade_timer_id = None
 
     def _on_autohide_timer(self):
-        self.hide_timer_id = None
-        if self.is_pinned or self.is_hovered or self.is_scrubbing:
-            return False
-
-        self._start_fade_out()
         return False
 
     def _start_fade_out(self):
-        self._cancel_fade()
-        step = 0
-        total_steps = 22
-
-        def fade_step():
-            nonlocal step
-            if self.is_pinned or self.is_hovered or self.is_scrubbing:
-                self.set_opacity(1.0)
-                self.fade_timer_id = None
-                return False
-
-            step += 1
-            t = step / float(total_steps)
-            if t >= 1.0:
-                self.set_opacity(0.0)
-                self.set_visible(False)
-                self.fade_timer_id = None
-                self.is_hovered = False
-                self.is_scrubbing = False
-                return False
-
-            ease = t * t * (3.0 - 2.0 * t)
-            opacity = max(0.0, 1.0 - ease)
-            self.set_opacity(opacity)
-            return True
-
-        self.fade_timer_id = GLib.timeout_add(16, fade_step)
+        pass
 
     def hide_osd_immediate(self):
         self._cancel_hide_timer()
@@ -2246,8 +2169,6 @@ class SpotifyMiniWindow(Gtk.Window):
     def _toggle_pin(self, button=None):
         new_state = not self.is_pinned
         self.set_pinned(new_state)
-        if not new_state:
-            self._schedule_hide(3500)
 
     def _launch_spotify(self, button):
         try:
