@@ -373,7 +373,7 @@ class SpotifyMiniWindow(Gtk.Window):
         super().__init__(*args, **kwargs)
 
         self.set_title("Spotify Mini")
-        self.set_default_size(430, 185)
+        self.set_default_size(520, 185)
         self.set_resizable(False)
         self.set_decorated(False)
         self.set_focusable(False)
@@ -484,6 +484,8 @@ class SpotifyMiniWindow(Gtk.Window):
         # Top Bar: Real Spotify Logo + Equalizer + Real Volume Slider on Left, Controls on Right
         top_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         top_bar.add_css_class("top-bar")
+        top_bar.set_size_request(-1, 35)
+        top_bar.set_valign(Gtk.Align.CENTER)
 
         # Left box: Logo + Soundwave visualizer + Real Spotify Volume
         left_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -533,11 +535,15 @@ class SpotifyMiniWindow(Gtk.Window):
         # Spacers and release version badge (Grabbable drag area)
         spacer1 = Gtk.Box()
         spacer1.set_hexpand(True)
+        spacer1.set_size_request(16, -1)
+        spacer1.set_valign(Gtk.Align.CENTER)
         top_bar.append(spacer1)
 
         self.version_btn = Gtk.Button(label=f"v{APP_VERSION} • GitHub")
         self.version_btn.add_css_class("version-link")
         self.version_btn.set_valign(Gtk.Align.CENTER)
+        self.version_btn.set_margin_start(10)
+        self.version_btn.set_margin_end(10)
         self.version_btn.set_cursor_from_name("pointer")
         self.version_btn.set_tooltip_text(f"GitHub: Xronni/spotify-mini-player (v{APP_VERSION})")
         self.version_btn.connect("clicked", open_github_repo)
@@ -545,6 +551,8 @@ class SpotifyMiniWindow(Gtk.Window):
 
         spacer2 = Gtk.Box()
         spacer2.set_hexpand(True)
+        spacer2.set_size_request(16, -1)
+        spacer2.set_valign(Gtk.Align.CENTER)
         top_bar.append(spacer2)
 
         # Right Action Buttons (Queue, Pin, Raise, Close)
@@ -915,7 +923,7 @@ class SpotifyMiniWindow(Gtk.Window):
 
     def _on_revealer_revealed_changed(self, revealer, param):
         if not revealer.get_child_revealed() and not self.is_queue_open:
-            self.set_default_size(430, 185)
+            self.set_default_size(520, 185)
 
     def _on_queue_scrolled(self, adj):
         if getattr(self, "_ignore_scroll_event", False):
@@ -1104,8 +1112,7 @@ class SpotifyMiniWindow(Gtk.Window):
             self._skip_target_idx = next_idx
             self.queue_mgr.last_valid_idx = next_idx
             target_track = all_tracks[next_idx]
-            self._apply_immediate_skip_ui_and_debounce(target_track, send_open_uri=False)
-            self.mpris.next()
+            self._apply_immediate_skip_ui_and_debounce(target_track, send_open_uri=True)
 
         self.show_osd(4500, force=True)
 
@@ -1114,8 +1121,10 @@ class SpotifyMiniWindow(Gtk.Window):
         should_ignore_rewind = (now < getattr(self, "_ignore_rewind_until", 0.0))
         fresh_us = self.mpris.get_fresh_position()
         if fresh_us > 3_000_000 and self._skip_target_idx is None and not should_ignore_rewind:
-            self._ignore_rewind_until = now + 2.0
+            self._ignore_rewind_until = now + 2.5
             self.mpris.previous()
+            self.max_track_pos = 0.0
+            self.last_sync_pos = 0.0
             self.anchor_pos = 0.0
             self.anchor_time = now
             self.scale.set_value(0)
@@ -1126,7 +1135,8 @@ class SpotifyMiniWindow(Gtk.Window):
         all_tracks = self.queue_mgr.all_context_tracks
         if not all_tracks or len(all_tracks) <= 1:
             self._set_switching_track(duration_ms=3500)
-            self._ignore_rewind_until = now + 2.0
+            self._ignore_rewind_until = now + 2.5
+            self.max_track_pos = 0.0
             self.anchor_pos = 0.0
             self.anchor_time = now
             self.last_sync_pos = 0.0
@@ -1183,8 +1193,7 @@ class SpotifyMiniWindow(Gtk.Window):
             self._skip_target_idx = prev_idx
             self.queue_mgr.last_valid_idx = prev_idx
             target_track = all_tracks[prev_idx]
-            self._apply_immediate_skip_ui_and_debounce(target_track, send_open_uri=False)
-            self.mpris.previous()
+            self._apply_immediate_skip_ui_and_debounce(target_track, send_open_uri=True)
 
         self.show_osd(4500, force=True)
 
@@ -1232,7 +1241,7 @@ class SpotifyMiniWindow(Gtk.Window):
         self.last_sync_pos = 0.0
         self.scale.set_value(0)
         self.pos_label.set_text("00:00")
-        self._ignore_rewind_until = time.time() + 2.0
+        self._ignore_rewind_until = time.time() + 2.5
 
         # Show queue spinner when track is skipped (if queue is open)
         if getattr(self, "is_queue_open", False):
@@ -1242,7 +1251,7 @@ class SpotifyMiniWindow(Gtk.Window):
         self._rebuild_queue_ui(order_changed=False)
 
         if send_open_uri:
-            # Debounce the actual OpenUri call to Spotify by 300ms:
+            # Debounce the actual OpenUri call to Spotify by 120ms:
             if getattr(self, "_skip_debounce_id", None):
                 try:
                     GLib.source_remove(self._skip_debounce_id)
@@ -1255,7 +1264,7 @@ class SpotifyMiniWindow(Gtk.Window):
                 self.play_track_silent(target_uri)
                 return False
 
-            self._skip_debounce_id = GLib.timeout_add(300, do_send_open_uri)
+            self._skip_debounce_id = GLib.timeout_add(120, do_send_open_uri)
         else:
             if getattr(self, "_skip_debounce_id", None):
                 try:
@@ -2024,7 +2033,7 @@ class SpotifyMiniWindow(Gtk.Window):
         max_pos = getattr(self, "max_track_pos", 0.0)
         last_pos = getattr(self, "last_sync_pos", 0.0)
         cur_pos = max(max_pos, last_pos)
-        return (cur_pos >= max(1.0, dur - 6.0)) or (cur_pos >= dur * 0.85 and dur > 15.0)
+        return cur_pos >= max(1.0, dur - 2.5)
 
     def _trigger_auto_next_track(self):
         if getattr(self, "_switching_track", False):
@@ -2087,10 +2096,10 @@ class SpotifyMiniWindow(Gtk.Window):
 
             is_rewound_to_start = (
                 self._is_song_at_end() and
-                (fresh_sec < 4.5 or fresh_sec < self.last_sync_pos - 15.0)
+                (fresh_sec < 3.0)
             )
 
-            is_rewind = is_rewound_to_start or (self.last_sync_pos > fresh_sec + 0.5 and fresh_sec < 2.0)
+            is_rewind = is_rewound_to_start or (self.last_sync_pos > fresh_sec + 0.8 and fresh_sec < 2.0)
             if is_rewind:
                 self.anchor_pos = fresh_sec
                 self.anchor_time = time.time()
@@ -2123,26 +2132,37 @@ class SpotifyMiniWindow(Gtk.Window):
         self.pos_label.set_text(format_time(fresh_sec))
 
     def _on_user_media_action(self, key=""):
-        key_str = str(key).strip().lower()
-        if getattr(self, "user_shuffle", False) and self.queue_mgr.all_context_tracks:
-            if key_str in ("next", "nexttrack"):
-                self.on_user_next_clicked()
-            elif key_str in ("previous", "prev", "prevtrack"):
-                self.on_user_prev_clicked()
-        elif not self.mpris.is_available:
-            pass
-        else:
-            # Spotify natively handles standard media keys via GNOME SettingsDaemon.
-            # Do not emit duplicate commands to preserve context and avoid double skips.
-            pass
+        now = time.time()
+        if now - getattr(self, "_last_media_key_time", 0.0) < 0.18:
+            return
+        self._last_media_key_time = now
 
-        fresh_us = self.mpris.get_fresh_position()
-        if fresh_us >= 0:
-            fresh_sec = fresh_us / 1_000_000.0
-            self.anchor_pos = fresh_sec
-            self.anchor_time = time.time()
-            self.scale.set_value(fresh_sec)
-            self.pos_label.set_text(format_time(fresh_sec))
+        key_str = str(key).strip().lower()
+        if key_str in ("next", "nexttrack"):
+            if self.queue_mgr.all_context_tracks:
+                self.on_user_next_clicked()
+            elif self.mpris.is_available:
+                self.mpris.next()
+        elif key_str in ("previous", "prev", "prevtrack"):
+            if self.queue_mgr.all_context_tracks:
+                self.on_user_prev_clicked()
+            elif self.mpris.is_available:
+                self.mpris.previous()
+        elif key_str in ("play", "pause", "playpause"):
+            if self.mpris.is_available:
+                self.mpris.play_pause()
+        elif key_str in ("stop",):
+            if self.mpris.is_available:
+                self.mpris.pause()
+
+        if self.mpris.is_available:
+            fresh_us = self.mpris.get_fresh_position()
+            if fresh_us >= 0:
+                fresh_sec = fresh_us / 1_000_000.0
+                self.anchor_pos = fresh_sec
+                self.anchor_time = time.time()
+                self.scale.set_value(fresh_sec)
+                self.pos_label.set_text(format_time(fresh_sec))
 
         self.show_osd(4500, force=True)
 
@@ -2442,8 +2462,9 @@ class SpotifyMiniWindow(Gtk.Window):
         elif status in ("Paused", "Stopped"):
             self.anchor_pos = self.scale.get_value()
             if self._is_song_at_end() and not getattr(self, "is_scrubbing", False) and time.time() >= getattr(self, "_ignore_rewind_until", 0.0):
-                if self._trigger_auto_next_track():
-                    return False
+                if self.duration_sec > 3.0 and self.anchor_pos >= max(1.0, self.duration_sec - 1.5):
+                    if self._trigger_auto_next_track():
+                        return False
 
         if is_user_action:
             self.show_osd(4500)
