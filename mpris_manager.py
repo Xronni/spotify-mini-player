@@ -39,8 +39,57 @@ class MPRISManager:
 
         os.makedirs(CACHE_DIR, exist_ok=True)
 
+        self.mon_conn = None
+        self._is_internal_call = False
+        self._setup_media_keys_monitor()
         self._subscribe_signals()
         self.connect_spotify()
+
+    def _setup_media_keys_monitor(self):
+        """Monitors system-wide D-Bus calls to Next and Previous on MPRIS Player.
+        On modern GNOME (e.g. Ubuntu 24.04), gsd-media-keys invokes Next/Previous directly
+        on Spotify's D-Bus interface rather than emitting MediaPlayerKeyPressed.
+        BecomeMonitor intercepts these calls regardless of desktop environment."""
+        try:
+            addr = Gio.dbus_address_get_for_bus_sync(Gio.BusType.SESSION, None)
+            self.mon_conn = Gio.DBusConnection.new_for_address_sync(
+                addr,
+                Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+                None, None
+            )
+            rules = [
+                "type='method_call',interface='org.mpris.MediaPlayer2.Player',member='Next'",
+                "type='method_call',interface='org.mpris.MediaPlayer2.Player',member='Previous'"
+            ]
+            params = GLib.Variant("(asu)", (rules, 0))
+            self.mon_conn.call_sync(
+                "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                "org.freedesktop.DBus.Monitoring", "BecomeMonitor",
+                params, None, Gio.DBusCallFlags.NONE, -1, None
+            )
+            self.mon_conn.add_filter(self._on_monitor_filter, None)
+        except Exception as e:
+            print(f"D-Bus BecomeMonitor not available: {e}")
+            self.mon_conn = None
+
+    def _on_monitor_filter(self, conn, msg, incoming, user_data):
+        member = msg.get_member()
+        if member in ("Next", "Previous"):
+            sender = msg.get_sender()
+            my_bus_name = self.bus.get_unique_name() if self.bus else None
+            if sender and sender != my_bus_name and not getattr(self, "_is_internal_call", False):
+                action = "next" if member == "Next" else "previous"
+                if self.on_media_key_cb:
+                    GLib.idle_add(lambda a=action: self.on_media_key_cb(a))
+        return None
+
+    def close(self):
+        if self.mon_conn:
+            try:
+                self.mon_conn.close_sync(None)
+            except Exception:
+                pass
+            self.mon_conn = None
 
     def _subscribe_signals(self):
         # 1. Watch for Spotify process starting or closing
@@ -334,16 +383,22 @@ class MPRISManager:
     def next(self):
         if self.player_proxy:
             try:
+                self._is_internal_call = True
                 self.player_proxy.call_sync("Next", None, Gio.DBusCallFlags.NONE, -1, None)
             except Exception as e:
                 print(f"Next failed: {e}")
+            finally:
+                self._is_internal_call = False
 
     def previous(self):
         if self.player_proxy:
             try:
+                self._is_internal_call = True
                 self.player_proxy.call_sync("Previous", None, Gio.DBusCallFlags.NONE, -1, None)
             except Exception as e:
                 print(f"Previous failed: {e}")
+            finally:
+                self._is_internal_call = False
 
     def set_position(self, pos_us):
         if self.player_proxy and self.track_id:

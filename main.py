@@ -1042,17 +1042,20 @@ class SpotifyMiniWindow(Gtk.Window):
     def on_user_next_clicked(self, *args):
         all_tracks = self.queue_mgr.all_context_tracks
         if not all_tracks or len(all_tracks) <= 1:
-            self._set_switching_track(duration_ms=3500)
-            self._ignore_rewind_until = time.time() + 2.0
-            self.max_track_pos = 0.0
-            self.anchor_pos = 0.0
-            self.anchor_time = time.time()
-            self.last_sync_pos = 0.0
-            self.scale.set_value(0)
-            self.pos_label.set_text("00:00")
-            self.mpris.next()
-            self.show_osd(4500, force=True)
-            return
+            self.queue_mgr.check_for_updates()
+            all_tracks = self.queue_mgr.all_context_tracks
+            if not all_tracks or len(all_tracks) <= 1:
+                self._set_switching_track(duration_ms=3500)
+                self._ignore_rewind_until = time.time() + 2.0
+                self.max_track_pos = 0.0
+                self.anchor_pos = 0.0
+                self.anchor_time = time.time()
+                self.last_sync_pos = 0.0
+                self.scale.set_value(0)
+                self.pos_label.set_text("00:00")
+                self.mpris.next()
+                self.show_osd(4500, force=True)
+                return
 
         is_shuffle = getattr(self, "user_shuffle", False)
         if is_shuffle:
@@ -1120,7 +1123,8 @@ class SpotifyMiniWindow(Gtk.Window):
         now = time.time()
         should_ignore_rewind = (now < getattr(self, "_ignore_rewind_until", 0.0))
         fresh_us = self.mpris.get_fresh_position()
-        if fresh_us > 3_000_000 and self._skip_target_idx is None and not should_ignore_rewind:
+        curr_pos_sec = max(fresh_us / 1_000_000.0 if fresh_us >= 0 else 0.0, getattr(self, "anchor_pos", 0.0))
+        if curr_pos_sec > 3.0 and self._skip_target_idx is None and not should_ignore_rewind:
             self._ignore_rewind_until = now + 2.5
             self.mpris.previous()
             self.max_track_pos = 0.0
@@ -1134,17 +1138,20 @@ class SpotifyMiniWindow(Gtk.Window):
 
         all_tracks = self.queue_mgr.all_context_tracks
         if not all_tracks or len(all_tracks) <= 1:
-            self._set_switching_track(duration_ms=3500)
-            self._ignore_rewind_until = now + 2.5
-            self.max_track_pos = 0.0
-            self.anchor_pos = 0.0
-            self.anchor_time = now
-            self.last_sync_pos = 0.0
-            self.scale.set_value(0)
-            self.pos_label.set_text("00:00")
-            self.mpris.previous()
-            self.show_osd(4500, force=True)
-            return
+            self.queue_mgr.check_for_updates()
+            all_tracks = self.queue_mgr.all_context_tracks
+            if not all_tracks or len(all_tracks) <= 1:
+                self._set_switching_track(duration_ms=3500)
+                self._ignore_rewind_until = now + 2.5
+                self.max_track_pos = 0.0
+                self.anchor_pos = 0.0
+                self.anchor_time = now
+                self.last_sync_pos = 0.0
+                self.scale.set_value(0)
+                self.pos_label.set_text("00:00")
+                self.mpris.previous()
+                self.show_osd(4500, force=True)
+                return
 
         is_shuffle = getattr(self, "user_shuffle", False)
         if is_shuffle:
@@ -1261,6 +1268,10 @@ class SpotifyMiniWindow(Gtk.Window):
 
             def do_send_open_uri():
                 self._skip_debounce_id = None
+                cur_id = self.queue_mgr._extract_id(self.mpris.get_fresh_track_id())
+                tgt_id = self.queue_mgr._extract_id(target_uri)
+                if cur_id and tgt_id and cur_id == tgt_id:
+                    return False
                 self.play_track_silent(target_uri)
                 return False
 
@@ -2281,6 +2292,8 @@ class SpotifyMiniWindow(Gtk.Window):
     def _on_quit_app(self):
         if hasattr(self, "queue_mgr") and self.queue_mgr:
             self.queue_mgr.save_cache()
+        if hasattr(self, "mpris") and self.mpris:
+            self.mpris.close()
         app = self.get_application()
         if app:
             app.quit()
@@ -2354,15 +2367,22 @@ class SpotifyMiniWindow(Gtk.Window):
                         target_tid = self.queue_mgr._extract_id(t_item.get("uri", ""))
                     target_title = t_item.get("title", "")
 
-            # If user is still rapidly clicking (debounce timer active), wait for debounce:
-            if getattr(self, "_skip_debounce_id", None) is not None:
-                return False
-
             matches_target = False
             if target_tid and incoming_tid == target_tid:
                 matches_target = True
             elif target_title and self.mpris.title and target_title.strip().lower() == self.mpris.title.strip().lower():
                 matches_target = True
+
+            # If target already matches, cancel debounce to avoid redundant OpenUri; else wait for debounce:
+            if matches_target:
+                if getattr(self, "_skip_debounce_id", None) is not None:
+                    try:
+                        GLib.source_remove(self._skip_debounce_id)
+                    except Exception:
+                        pass
+                    self._skip_debounce_id = None
+            elif getattr(self, "_skip_debounce_id", None) is not None:
+                return False
 
             if matches_target or track_changed or not getattr(self, "_switching_track", False):
                 self._pending_target_uri = None

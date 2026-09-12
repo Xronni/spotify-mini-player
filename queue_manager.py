@@ -541,9 +541,12 @@ class QueueManager:
                 if self.context_uri.startswith("spotify:playlist:") or (self.context_uri.startswith("spotify:album:") and is_valid_name(album) and album.strip().casefold() != (self.context_name or "").strip().casefold()):
                     context_has_changed = True
 
-        # If previous context was a single (1 track), and incoming track has an album and is not a single:
-        if len(self.all_context_tracks) <= 1 and not (self.context_uri and self.context_uri.startswith("spotify:playlist:")) and is_valid_name(album) and not is_single:
-            context_has_changed = True
+        # If previous context was a single (<= 1 track), upgrade if a playlist is detected or if track is from an album:
+        if len(self.all_context_tracks) <= 1:
+            if detected_ctx and detected_ctx.startswith("spotify:playlist:"):
+                context_has_changed = True
+            elif not (self.context_uri and self.context_uri.startswith("spotify:playlist:")) and is_valid_name(album) and not is_single:
+                context_has_changed = True
 
         # If previous context was an album, and MPRIS reports a different album name:
         if self.context_uri and self.context_uri.startswith("spotify:album:") and is_valid_name(album):
@@ -1323,7 +1326,7 @@ class QueueManager:
                         seen.add(uri)
                         candidate_containers.append(uri)
 
-                # Check candidate containers from newest to oldest
+                # 1. Prioritize playlists that genuinely contain the playing track
                 for cand in candidate_containers:
                     if cand.startswith("spotify:playlist:"):
                         pid = cand.split(":")[-1]
@@ -1335,7 +1338,10 @@ class QueueManager:
                                 return cand
                         else:
                             return cand
-                    elif cand.startswith("spotify:album:"):
+
+                # 2. If no matching playlist was found, check albums
+                for cand in candidate_containers:
+                    if cand.startswith("spotify:album:"):
                         aid = cand.split(":")[-1]
                         if current_album and is_valid_name(current_album):
                             if cand in self.context_cache:
@@ -1393,6 +1399,9 @@ class QueueManager:
                                 return best_track_ctx
                             return None
                         return best_container_ctx
+                    elif tid and self.context_uri and self.context_uri.startswith("spotify:playlist:"):
+                        if any(t.get("tid") == tid for t in self.all_context_tracks):
+                            return self.context_uri
                     return best_container_ctx
 
                 if best_track_ctx and (now_ms - best_track_ts < 3 * 3600 * 1000):
