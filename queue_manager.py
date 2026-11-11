@@ -127,6 +127,15 @@ class QueueManager:
         self._last_sort_state = None
         self._cached_sort_states = {}
         self._lock = threading.Lock()
+        self._restore_cache = (None, None)  # (mtime, parsed state) of context_player_state_restore
+        self._last_detect_authoritative = False
+        self._last_detected_ctx = None
+        # Metadata resolver (single background worker)
+        self._resolver_lock = threading.Lock()
+        self._resolver_running = False
+        self._resolver_wanted = False
+        self._meta_attempted = set()
+        self._bulk_prefilled = set()
         self.load_cache()
 
     def _lookup_track_meta(self, tid):
@@ -198,6 +207,7 @@ class QueueManager:
             print(f"Error saving queue cache: {e}")
 
     def notify(self, order_changed=False):
+        self._hydrate_tracks(self.all_context_tracks)
         self.save_cache()
         if self.on_queue_changed_cb:
             try:
@@ -377,7 +387,8 @@ class QueueManager:
 
         # Check if active context in Spotify has changed:
         detected = self._detect_active_context_uri(curr_id, current_album)
-        if detected and self.context_uri and detected != self.context_uri and not detected.startswith("spotify:track:"):
+        if (detected and self.context_uri and detected != self.context_uri
+                and detected != self._last_detected_ctx and not detected.startswith("spotify:track:")):
             if self.current_track:
                 self.update_current_track(
                     self.current_track.get("title", ""),
@@ -535,6 +546,8 @@ class QueueManager:
         ))
 
         detected_ctx = self._detect_active_context_uri(curr_id, album)
+        authoritative = self._last_detect_authoritative
+        self._last_detected_ctx = detected_ctx
 
         track_in_current_context = (self._find_track_idx(uri, title) >= 0) if self.all_context_tracks else False
 
@@ -546,7 +559,7 @@ class QueueManager:
             elif detected_ctx != self.context_uri:
                 if detected_ctx.startswith("spotify:track:"):
                     # Standalone track URI emitted - change context if single or not in current context
-                    if is_single or not track_in_current_context:
+                    if authoritative or is_single or not track_in_current_context:
                         context_has_changed = True
                     else:
                         context_has_changed = False
@@ -745,6 +758,27 @@ class QueueManager:
                                 }
                             self.notify(order_changed=True)
                             return
+
+                if authoritative:
+                    # Spotify itself reports this playlist as the playing context: never fall back to
+                    # the track's album, even if our copy of the playlist does not list the track (yet).
+                    pl_tracks = fresh_tracks or self._fetch_embed_tracks(detected_ctx)[1]
+                    if pl_tracks:
+                        pl_name = self._get_playlist_name_from_ldb(new_pid) or (self.context_cache.get(detected_ctx) or ("",))[0]
+                        with self._lock:
+                            self.context_uri = detected_ctx
+                            if is_valid_name(pl_name):
+                                self.context_name = pl_name
+                            self.all_context_tracks = pl_tracks
+                            self.current_track = {
+                                "title": title,
+                                "artist": artist,
+                                "uri": uri,
+                                "album": album
+                            }
+                        self.notify(order_changed=True)
+                        self._resolve_missing_tracks_async()
+                        return
 
             elif detected_ctx.startswith("spotify:album:"):
                 name, emb_tracks = self._fetch_embed_tracks(detected_ctx)
@@ -1111,113 +1145,94 @@ class QueueManager:
 
         return cached
 
+    RESOLVE_WORKERS = 5
+    RESOLVE_BATCH = 10
+
     def _resolve_missing_tracks_async(self, curr_idx=None):
+        """Requests background resolution of placeholder titles/artists in the active queue.
+        Exactly one worker runs at a time; repeated requests only re-prioritise it."""
         if not self.all_context_tracks:
             return
-
-        def resolver():
-            time.sleep(1.0)
-            with self._lock:
-                tracks = self.all_context_tracks
-                n_tracks = len(tracks)
-
-            if n_tracks == 0:
+        with self._resolver_lock:
+            self._resolver_wanted = True
+            if self._resolver_running:
                 return
+            self._resolver_running = True
+        threading.Thread(target=self._resolver_worker, daemon=True).start()
 
-            c_idx = curr_idx
-            if c_idx is None:
-                if self.current_track:
-                    curr_id = self._extract_id(self.current_track.get("uri", ""))
-                    norm_title = self.current_track.get("title", "").strip().lower()
-                    for idx, t in enumerate(tracks):
-                        tid = self._extract_id(t.get("uri", ""))
-                        if (curr_id and tid == curr_id) or (t.get("title", "").strip().lower() == norm_title):
-                            c_idx = idx
-                            break
-                if c_idx is None:
-                    c_idx = 0
+    def _current_queue_idx(self, tracks):
+        if self.current_track:
+            idx = self._find_track_idx(self.current_track.get("uri", ""), self.current_track.get("title", ""))
+            if idx >= 0:
+                return idx
+        idx = getattr(self, "last_valid_idx", 0) or 0
+        return idx if 0 <= idx < len(tracks) else 0
 
-            def is_incomplete(t):
-                no_title = t.get("title") in ("Трек", "", None, "Track")
-                no_artist = not t.get("artist") or t.get("artist").strip().casefold() == "spotify"
-                return no_title or no_artist
+    def _resolver_worker(self):
+        try:
+            while True:
+                with self._resolver_lock:
+                    if not self._resolver_wanted:
+                        self._resolver_running = False
+                        return
+                    self._resolver_wanted = False
+                self._resolve_pass()
+        except Exception as e:
+            print(f"Metadata resolver error: {e}")
+            with self._resolver_lock:
+                self._resolver_running = False
 
-            any_updated = False
+    def _resolve_pass(self):
+        tracks = self.all_context_tracks
+        ctx = self.context_uri
+        if not tracks:
+            return
 
-            # 1. High-priority window: visible in queue (15 before, 45 after)
-            start_i = max(0, c_idx - 15)
-            end_i = min(n_tracks, c_idx + 45)
+        # 1. Bulk prefill: one embed request returns titles/artists for up to 100 tracks
+        if ctx and ctx.startswith(("spotify:playlist:", "spotify:album:")) and ctx not in self._bulk_prefilled:
+            self._bulk_prefilled.add(ctx)
+            if any(self._is_placeholder_title(t.get("title")) for t in tracks if not t.get("local")):
+                self.context_cache.pop(ctx, None)  # force a fresh fetch to fill the metadata cache
+                self._fetch_embed_tracks(ctx)
+                self._hydrate_tracks(tracks)
+                GLib.idle_add(lambda: self.notify(order_changed=False) and False)
 
-            missing_priority = []
-            for i in range(start_i, end_i):
-                t = tracks[i]
-                tid = self._extract_id(t.get("uri", ""))
-                cached = self._lookup_track_meta(tid)
-                if cached:
-                    if t.get("title") in ("Трек", "", None, "Track") and cached.get("title"):
-                        t["title"] = cached.get("title")
-                    c_art = (cached.get("artist") or "").strip()
-                    if (not t.get("artist") or t.get("artist") == "Spotify") and c_art and c_art != "Spotify":
-                        t["artist"] = c_art
-                    if not t.get("album") and cached.get("album"):
-                        t["album"] = cached.get("album")
-                if tid and is_incomplete(t):
-                    missing_priority.append((i, tid))
+        # 2. Per-track lookups, nearest to the current track first; titles before artists
+        c_idx = self._current_queue_idx(tracks)
+        order = sorted(range(len(tracks)), key=lambda i: (0 if -15 <= i - c_idx <= 45 else 1, abs(i - c_idx)))
+        no_title, no_artist = [], []
+        for i in order:
+            t = tracks[i]
+            if t.get("local"):
+                continue
+            tid = t.get("tid") or self._extract_id(t.get("uri", ""))
+            if not tid or is_local_key(tid) or tid in self._meta_attempted:
+                continue
+            if self._is_placeholder_title(t.get("title")):
+                no_title.append(tid)
+            elif not (t.get("artist") or "").strip():
+                no_artist.append(tid)
+        pending = no_title + no_artist
+        if not pending:
+            return
 
-            if missing_priority:
-                for i, tid in missing_priority:
-                    if getattr(self, "_rate_limited_until", 0) > time.time():
-                        break
-                    meta = self._fetch_track_info(tid)
-                    if meta and i < len(tracks):
-                        if meta.get("title"):
-                            tracks[i]["title"] = meta["title"]
-                        if meta.get("artist") and meta["artist"] != "Spotify":
-                            tracks[i]["artist"] = meta["artist"]
-                        if meta.get("album"):
-                            tracks[i]["album"] = meta["album"]
-                        any_updated = True
-                    time.sleep(0.35)
+        with ThreadPoolExecutor(max_workers=self.RESOLVE_WORKERS) as pool:
+            for start in range(0, len(pending), self.RESOLVE_BATCH):
+                # Stop when the queue changed (new context / new priorities) or Spotify rate-limits us
+                if self.all_context_tracks is not tracks or self._resolver_wanted:
+                    break
+                if getattr(self, "_rate_limited_until", 0) > time.time():
+                    break
+                batch = pending[start:start + self.RESOLVE_BATCH]
+                self._meta_attempted.update(batch)
+                results = list(pool.map(self._fetch_track_info, batch))
+                if any(results):
+                    self._hydrate_tracks(tracks)
+                    GLib.idle_add(lambda: self.notify(order_changed=False) and False)
 
-            # 2. Gentle background pass for the rest of the playlist
-            remaining_missing = []
-            for i in range(n_tracks):
-                if i < start_i or i >= end_i:
-                    t = tracks[i]
-                    tid = self._extract_id(t.get("uri", ""))
-                    cached = self._lookup_track_meta(tid)
-                    if cached:
-                        if t.get("title") in ("Трек", "", None, "Track") and cached.get("title"):
-                            t["title"] = cached.get("title")
-                        c_art = (cached.get("artist") or "").strip()
-                        if (not t.get("artist") or t.get("artist") == "Spotify") and c_art and c_art != "Spotify":
-                            t["artist"] = c_art
-                        if not t.get("album") and cached.get("album"):
-                            t["album"] = cached.get("album")
-                    if tid and is_incomplete(t):
-                        remaining_missing.append((i, tid))
-
-            if remaining_missing:
-                for i, tid in remaining_missing:
-                    if getattr(self, "_rate_limited_until", 0) > time.time():
-                        break
-                    meta = self._fetch_track_info(tid)
-                    if meta and i < len(tracks):
-                        if meta.get("title"):
-                            tracks[i]["title"] = meta["title"]
-                        if meta.get("artist") and meta["artist"] != "Spotify":
-                            tracks[i]["artist"] = meta["artist"]
-                        if meta.get("album"):
-                            tracks[i]["album"] = meta["album"]
-                        any_updated = True
-                    time.sleep(0.7)
-
-            if any_updated:
-                self.save_cache()
-                GLib.idle_add(lambda: self.notify(order_changed=False))
-
-        t = threading.Thread(target=resolver, daemon=True)
-        t.start()
+        if getattr(self, "_rate_limited_until", 0) > time.time():
+            # Allow the throttled tracks to be retried once the rate limit is over
+            self._meta_attempted.difference_update(pending)
 
     def _sync_context_async(self, track_id, title, artist, album):
         if self._fetching:
@@ -1339,6 +1354,67 @@ class QueueManager:
         t = threading.Thread(target=worker, daemon=True)
         t.start()
 
+    def _read_restore_state(self):
+        """Parses Spotify's context_player_state_restore: the currently loaded track and the
+        context (playlist / album / ...) it is playing from. Cached by file mtime."""
+        files = glob.glob(os.path.expanduser("~/.cache/spotify/Users/*-user/context_player_state_restore"))
+        if not files:
+            return None
+        try:
+            fpath = max(files, key=os.path.getmtime)
+            mtime = os.path.getmtime(fpath)
+            if self._restore_cache[0] == mtime:
+                return self._restore_cache[1]
+            with open(fpath, "rb") as fp:
+                c = fp.read()
+        except Exception:
+            return None
+
+        state = None
+        try:
+            m_track = PLAYLIST_ITEM_RE.search(c)
+            key = b"\n\x0bcontext_uri\x12"
+            i = c.find(key, m_track.end()) if m_track else -1
+            if m_track and i != -1:
+                ln, p = decode_varint(c, i + len(key))
+                ctx = c[p:p + ln].decode("utf-8", errors="ignore")
+                track_uri = m_track.group(0).decode("ascii", errors="ignore")
+                if ctx.startswith("spotify:"):
+                    state = {
+                        "track_uri": track_uri,
+                        "track_key": self._extract_id(track_uri),
+                        "context_uri": ctx,
+                        "mtime": mtime,
+                    }
+        except Exception as e:
+            print(f"Error parsing context_player_state_restore: {e}")
+        self._restore_cache = (mtime, state)
+        return state
+
+    @staticmethod
+    def _is_placeholder_title(title):
+        return not title or title in ("Трек", "Track")
+
+    def _hydrate_tracks(self, tracks):
+        """Fills placeholder titles/artists of queue entries from the metadata cache."""
+        for t in tracks or []:
+            if t.get("local"):
+                continue
+            needs_title = self._is_placeholder_title(t.get("title"))
+            needs_artist = not (t.get("artist") or "").strip()
+            if not (needs_title or needs_artist):
+                continue
+            cached = self._lookup_track_meta(t.get("tid") or self._extract_id(t.get("uri", "")))
+            if not cached:
+                continue
+            if needs_title and not self._is_placeholder_title(cached.get("title")):
+                t["title"] = cached["title"]
+            c_art = (cached.get("artist") or "").strip()
+            if needs_artist and c_art and c_art.casefold() != "spotify":
+                t["artist"] = c_art
+            if not t.get("album") and cached.get("album"):
+                t["album"] = cached["album"]
+
     def _detect_active_context_uri(self, current_track_id=None, current_album=None):
         """Finds the most recently active context from Spotify's live primary.ldb logs
         or context_player_state_restore, ensuring that the detected context actually corresponds
@@ -1347,8 +1423,23 @@ class QueueManager:
         if not tid and self.current_track:
             tid = self._extract_id(self.current_track.get("uri"))
 
+        self._last_detect_authoritative = False
         if not tid:
             return self.context_uri or None
+
+        # 0. Authoritative source: Spotify's own player state (context_player_state_restore).
+        #    Spotify rewrites it on every track/state change; trust it when its current track
+        #    is the track we are asking about.
+        restore = self._read_restore_state()
+        if restore and restore.get("context_uri") and restore.get("track_key") == tid:
+            self._last_detect_authoritative = True
+            return restore["context_uri"]
+
+        # 1. Keep the current context while it contains the playing track. A track that is also
+        #    part of other playlists must never pull the queue into one of them; real context
+        #    switches are picked up from the restore state above as soon as Spotify writes it.
+        if self.context_uri and self.all_context_tracks and any(t.get("tid") == tid for t in self.all_context_tracks):
+            return self.context_uri
 
         now_ms = time.time() * 1000
 
@@ -1517,15 +1608,15 @@ class QueueManager:
                     for idx, t in enumerate(track_list):
                         tid = self._extract_id(t.get("uri", ""))
                         title_str = (t.get("title") or "").strip()
-                        artist_str = (t.get("subtitle") or "").strip()
+                        artist_str = (t.get("subtitle") or "").replace("\xa0", " ").strip()
                         if artist_str.casefold() == "spotify":
                             artist_str = ""
                         if tid and title_str:
-                            self.track_meta_cache[tid] = {
-                                "title": title_str,
-                                "artist": artist_str,
-                                "uri": t.get("uri", "")
-                            }
+                            meta = self.track_meta_cache.setdefault(tid, {})
+                            meta["title"] = title_str
+                            if artist_str or not meta.get("artist"):
+                                meta["artist"] = artist_str
+                            meta["uri"] = t.get("uri", "")
                         res.append({
                             "track_num": idx + 1,
                             "title": title_str,
