@@ -34,6 +34,7 @@ class MPRISManager:
         self.playback_status = "Stopped"
         self.length_us = 0
         self.track_id = ""
+        self.track_uri = ""
         self.shuffle = False
         self.loop_status = "None"
 
@@ -80,7 +81,8 @@ class MPRISManager:
             if sender and sender != my_bus_name and not getattr(self, "_is_internal_call", False):
                 action = "next" if member == "Next" else "previous"
                 if self.on_media_key_cb:
-                    GLib.idle_add(lambda a=action: self.on_media_key_cb(a))
+                    # Spotify executes this call itself; the UI only has to react to it.
+                    GLib.idle_add(lambda a=action: self.on_media_key_cb(a, handled=True))
         return None
 
     def close(self):
@@ -208,7 +210,7 @@ class MPRISManager:
         except Exception:
             pass
         if self.on_media_key_cb:
-            GLib.idle_add(lambda k=key: self.on_media_key_cb(k))
+            GLib.idle_add(lambda k=key: self.on_media_key_cb(k, handled=False))
 
     def _on_seeked(self, conn, sender, path, iface, signal, params, user_data):
         pos_us = 0
@@ -288,6 +290,7 @@ class MPRISManager:
     def _parse_metadata(self, meta):
         old_track_id = self.track_id
         self.track_id = meta.get("mpris:trackid", "")
+        self.track_uri = self._canonical_uri(meta)
         track_changed = (self.track_id != old_track_id)
 
         self.title = meta.get("xesam:title", "Unknown Title")
@@ -305,6 +308,16 @@ class MPRISManager:
             self._download_cover_async(new_art_url)
 
         return track_changed
+
+    @staticmethod
+    def _canonical_uri(meta):
+        """Local files have no usable trackid; their xesam:url (open.spotify.com/local/...)
+        identifies them. For regular tracks the trackid is used as before."""
+        track_id = str(meta.get("mpris:trackid", "") or "")
+        url = str(meta.get("xesam:url", "") or "")
+        if "/local/" in url or "/local/" in track_id or track_id.startswith("spotify:local:"):
+            return url or track_id
+        return track_id
 
     def _download_cover_async(self, url):
         if not url:
@@ -357,6 +370,23 @@ class MPRISManager:
         except Exception:
             return -1
 
+    def get_fresh_track_info(self):
+        """Fetches uncached live (canonical track URI, title) directly from D-Bus.
+        The canonical URI also identifies local files."""
+        if not self.props_proxy or not self.is_available:
+            return self.track_uri, self.title
+        try:
+            meta = self.props_proxy.call_sync(
+                "Get",
+                GLib.Variant("(ss)", (PLAYER_INTERFACE, "Metadata")),
+                Gio.DBusCallFlags.NONE,
+                -1,
+                None
+            ).unpack()[0]
+            return (self._canonical_uri(meta) or self.track_uri), str(meta.get("xesam:title", "") or "")
+        except Exception:
+            return self.track_uri, self.title
+
     def get_fresh_track_id(self):
         """Fetches uncached live mpris:trackid directly from D-Bus."""
         if not self.props_proxy or not self.is_available:
@@ -379,6 +409,13 @@ class MPRISManager:
                 self.player_proxy.call_sync("PlayPause", None, Gio.DBusCallFlags.NONE, -1, None)
             except Exception as e:
                 print(f"PlayPause failed: {e}")
+
+    def pause(self):
+        if self.player_proxy:
+            try:
+                self.player_proxy.call_sync("Pause", None, Gio.DBusCallFlags.NONE, -1, None)
+            except Exception as e:
+                print(f"Pause failed: {e}")
 
     def next(self):
         if self.player_proxy:

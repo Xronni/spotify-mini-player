@@ -5,6 +5,7 @@ import json
 import time
 import urllib.request
 import threading
+from urllib.parse import unquote_plus
 from concurrent.futures import ThreadPoolExecutor
 from gi.repository import GLib
 
@@ -59,6 +60,55 @@ def read_ldb_clean(fpath):
         blk = raw[offset:offset + BLOCK_SIZE]
         clean_blocks.append(blk[HEADER_SIZE:] if len(blk) > HEADER_SIZE else blk)
     return b"".join(clean_blocks)
+
+_LOCAL_PART = rb"[A-Za-z0-9%+._~*'()!\-]*"
+# Matches playlist items in LevelDB slices: regular tracks and local files
+# (spotify:local:<artist>:<album>:<title>:<duration_sec>, URL-encoded parts).
+PLAYLIST_ITEM_RE = re.compile(
+    rb"spotify:(?:track:([a-zA-Z0-9]{22})|local:(" + _LOCAL_PART + rb":" + _LOCAL_PART + rb":" + _LOCAL_PART + rb":\d+))"
+)
+
+
+def parse_local_uri(uri):
+    """Parses a local-file URI (spotify:local:... or https://open.spotify.com/local/...).
+    Returns (artist, album, title, duration_sec) or None."""
+    if not uri:
+        return None
+    if uri.startswith("spotify:local:"):
+        parts = uri[len("spotify:local:"):].split(":")
+    else:
+        # https://open.spotify.com/local/<artist>/<album>/<title>/<sec> (MPRIS xesam:url)
+        # or /com/spotify/local/... (MPRIS trackid, best effort)
+        i = uri.find("open.spotify.com/local/")
+        marker = "open.spotify.com/local/"
+        if i < 0:
+            i = uri.find("/com/spotify/local/")
+            marker = "/com/spotify/local/"
+        if i < 0:
+            return None
+        parts = uri[i + len(marker):].split("?")[0].split("/")
+    if len(parts) != 4:
+        return None
+    artist, album, title = (unquote_plus(p).strip() for p in parts[:3])
+    try:
+        duration = int(parts[3])
+    except ValueError:
+        duration = 0
+    return artist, album, title, duration
+
+
+def local_track_key(uri):
+    """Stable identity for a local file, shared by LevelDB playlist entries and MPRIS metadata."""
+    parsed = parse_local_uri(uri)
+    if not parsed:
+        return ""
+    artist, _album, title, duration = parsed
+    return f"local:{artist.casefold()}:{title.casefold()}:{duration}"
+
+
+def is_local_key(tid):
+    return bool(tid) and str(tid).startswith("local:")
+
 
 class QueueManager:
     """Dynamically detects and syncs the REAL Spotify queue, playlist, or album in real time."""
@@ -754,7 +804,7 @@ class QueueManager:
                 "tid": curr_id
             }
             with self._lock:
-                self.context_uri = f"spotify:track:{curr_id}" if curr_id else uri
+                self.context_uri = (uri if is_local_key(curr_id) else f"spotify:track:{curr_id}") if curr_id else uri
                 self.context_name = album if is_valid_name(album) else (title if is_valid_name(title) else _("single"))
                 self.all_context_tracks = [single_t]
                 self.last_valid_idx = 0
@@ -778,7 +828,7 @@ class QueueManager:
             "tid": curr_id
         }
         with self._lock:
-            self.context_uri = f"spotify:track:{curr_id}" if curr_id else ""
+            self.context_uri = (uri if is_local_key(curr_id) else f"spotify:track:{curr_id}") if curr_id else ""
             self.context_name = album if is_valid_name(album) else (title if is_valid_name(title) else _("single"))
             self.all_context_tracks = [single_t]
             self.last_valid_idx = 0
@@ -789,6 +839,11 @@ class QueueManager:
     def _extract_id(self, uri):
         if not uri:
             return ""
+        if is_local_key(uri):
+            return uri
+        local_key = local_track_key(uri)
+        if local_key:
+            return local_key
         return uri.split(":")[-1].split("/")[-1].split("?")[0]
 
     def _get_playlist_sort_state(self, playlist_id):
@@ -872,8 +927,25 @@ class QueueManager:
 
         entries = []
         seen = set()
-        for m in re.finditer(rb"spotify:track:([a-zA-Z0-9]{22})", found_chunk):
-            tid = m.group(1).decode()
+        for m in PLAYLIST_ITEM_RE.finditer(found_chunk):
+            local_entry = None
+            if m.group(1):
+                tid = m.group(1).decode()
+                uri = "spotify:track:" + tid
+            else:
+                uri = "spotify:local:" + m.group(2).decode("ascii", errors="ignore")
+                parsed = parse_local_uri(uri)
+                if not parsed:
+                    continue
+                tid = local_track_key(uri)
+                l_artist, l_album, l_title, l_dur = parsed
+                local_entry = {
+                    "title": l_title or "Трек",
+                    "artist": l_artist,
+                    "album": l_album,
+                    "duration": l_dur * 1000,
+                    "local": True,
+                }
             t_end = m.end()
             p = found_chunk.find(b"\x10", t_end, t_end + 60)
             added_at = 0
@@ -886,10 +958,15 @@ class QueueManager:
                     added_by = user_match.group(0).decode(errors="ignore")
             if tid not in seen:
                 seen.add(tid)
-                entries.append({"tid": tid, "uri": "spotify:track:" + tid, "added_at": added_at, "added_by": added_by})
+                entry = {"tid": tid, "uri": uri, "added_at": added_at, "added_by": added_by}
+                if local_entry:
+                    entry.update(local_entry)
+                entries.append(entry)
 
         # Populate cached title / artist / album / duration
         for e in entries:
+            if e.get("local"):
+                continue
             cached = self._lookup_track_meta(e["tid"])
             if cached:
                 e["title"] = cached.get("title") or e.get("title") or "Трек"
@@ -943,7 +1020,7 @@ class QueueManager:
         return entries
 
     def _fetch_track_info(self, track_id):
-        if not track_id:
+        if not track_id or is_local_key(track_id):
             return None
         cached = self._lookup_track_meta(track_id)
         if cached:
@@ -1214,7 +1291,7 @@ class QueueManager:
                             self.current_track = {
                                 "title": title,
                                 "artist": artist,
-                                "uri": f"spotify:track:{track_id}" if track_id else "",
+                                "uri": tracks[curr_idx].get("uri") or (f"spotify:track:{track_id}" if track_id else ""),
                                 "track_num": curr_idx + 1
                             }
 
@@ -1463,7 +1540,7 @@ class QueueManager:
         return "", []
 
     def _fetch_album_for_track(self, track_id):
-        if not track_id:
+        if not track_id or is_local_key(track_id):
             return "", [], ""
         cache_key = f"track_album:{track_id}"
         if cache_key in self.context_cache:
