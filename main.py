@@ -26,7 +26,7 @@ SPOTIFY_LOGO_PATH = "/usr/share/spotify/icons/spotify-linux-128.png"
 CONFIG_DIR = os.path.expanduser("~/.config/spotify-mini-player")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
-APP_VERSION = "1.2.3"
+APP_VERSION = "1.2.4"
 GITHUB_REPO_URL = "https://github.com/Xronni/spotify-mini-player"
 
 def open_github_repo(widget=None):
