@@ -701,7 +701,24 @@ class SpotifyMiniWindow(Gtk.Window):
         self.cover_pic.set_size_request(84, 84)
         self.cover_pic.set_hexpand(False)
         self.cover_pic.set_vexpand(False)
-        self.cover_box.append(self.cover_pic)
+
+        # Loading veil + spinner shown over the cover while Spotify is moved to a queue entry
+        cover_overlay = Gtk.Overlay()
+        cover_overlay.set_child(self.cover_pic)
+        self.cover_loading = Gtk.Box()
+        self.cover_loading.add_css_class("cover-loading-veil")
+        self.cover_loading.set_halign(Gtk.Align.FILL)
+        self.cover_loading.set_valign(Gtk.Align.FILL)
+        self.cover_loading_spinner = Gtk.Spinner()
+        self.cover_loading_spinner.set_halign(Gtk.Align.CENTER)
+        self.cover_loading_spinner.set_valign(Gtk.Align.CENTER)
+        self.cover_loading_spinner.set_hexpand(True)
+        self.cover_loading_spinner.set_vexpand(True)
+        self.cover_loading.append(self.cover_loading_spinner)
+        self.cover_loading.set_visible(False)
+        self.cover_loading.set_can_target(False)
+        cover_overlay.add_overlay(self.cover_loading)
+        self.cover_box.append(cover_overlay)
         main_row.append(self.cover_box)
 
         # Right Column - centered vertically
@@ -1120,6 +1137,49 @@ class SpotifyMiniWindow(Gtk.Window):
         self.scale.set_value(0)
         self.pos_label.set_text("00:00")
 
+    def _set_loading(self, loading, track=None):
+        """Loading state while walking Spotify to a queue entry: the target is shown with a
+        spinner, and the seek bar / play state / cover are frozen instead of flickering through
+        every intermediate track."""
+        self._loading = loading
+        self.mpris.defer_covers = loading
+        if loading:
+            track = track or {}
+            title = track.get("title") or t("track_default")
+            self.title_label.set_text(title)
+            self.title_label.set_tooltip_text(title)
+            self.artist_label.set_text(t("loading_track"))
+            self.artist_label.set_tooltip_text(t("loading_track"))
+            self.artist_label.add_css_class("loading")
+            self.cover_loading.set_visible(True)
+            self.cover_loading_spinner.start()
+            self.scale.set_value(0)
+            self.scale.set_sensitive(False)
+            self.scale.add_css_class("loading")
+            self.pos_label.set_text("--:--")
+            dur_ms = track.get("duration") or 0
+            self.dur_label.set_text(format_time(dur_ms / 1000.0) if dur_ms else "--:--")
+            for lbl in (self.pos_label, self.dur_label):
+                lbl.add_css_class("loading")
+            if hasattr(self, "visualizer"):
+                self.visualizer.set_playing(False)
+            if getattr(self, "is_queue_open", False):
+                self.show_queue_loading(duration_ms=90000)
+        else:
+            self.artist_label.remove_css_class("loading")
+            self.cover_loading_spinner.stop()
+            self.cover_loading.set_visible(False)
+            self.scale.set_sensitive(True)
+            self.scale.remove_css_class("loading")
+            for lbl in (self.pos_label, self.dur_label):
+                lbl.remove_css_class("loading")
+            self.hide_queue_loading(force=True)
+            # The cover of the final track was not downloaded during the walk
+            self.mpris.art_url = ""
+            self.mpris.refresh_metadata()
+            # Never leave "Loading track…" behind, even when the walk was aborted
+            self._apply_metadata(track_changed=False)
+
     def _is_navigating(self):
         return self._queue_nav is not None or time.time() < self._window_poll_pause_until
 
@@ -1184,18 +1244,10 @@ class SpotifyMiniWindow(Gtk.Window):
             self.play_track_silent(uri)
             return
 
-        # Optimistic UI: show the target right away
+        # Loading state: show the target with a spinner instead of every intermediate track
         t_item = tracks[target_idx]
-        title = t_item.get("title") or t("track_default")
-        self.title_label.set_text(title)
-        self.title_label.set_tooltip_text(title)
-        artist = (t_item.get("artist") or "").strip()
-        if artist.casefold() == "spotify":
-            artist = ""
-        artist_text = format_artist_and_album(artist, t_item.get("album") or "", t_item.get("title") or "")
-        self.artist_label.set_text(artist_text)
-        self.artist_label.set_tooltip_text(artist_text)
         self._reset_progress_ui()
+        self._set_loading(True, t_item)
 
         now = time.time()
         self._queue_nav = {
@@ -1368,6 +1420,8 @@ class SpotifyMiniWindow(Gtk.Window):
             self.mpris.set_loop_status(nav["restore_loop"])
         if nav.get("restore_volume") is not None:
             self._restore_volume(nav["restore_volume"])
+        if getattr(self, "_loading", False):
+            self._set_loading(False)
 
         dlog(f"nav finish reached={reached} mode={nav.get('mode')} now='{self.mpris.get_fresh_track_info()[1]}' steps={nav['steps']} "
              f"secs={time.time() - nav['started_at']:.1f}")
@@ -2112,7 +2166,7 @@ class SpotifyMiniWindow(Gtk.Window):
         return False
 
     def _on_tick(self):
-        if not self.mpris.is_available:
+        if not self.mpris.is_available or getattr(self, "_loading", False):
             return True
 
         if self.mpris.playback_status == "Playing" and not self.is_scrubbing:
@@ -2140,7 +2194,7 @@ class SpotifyMiniWindow(Gtk.Window):
         return True
 
     def _on_mpris_seeked(self, pos_us):
-        if not self.mpris.is_available or self.is_scrubbing:
+        if not self.mpris.is_available or self.is_scrubbing or getattr(self, "_loading", False):
             return
         fresh_sec = pos_us / 1_000_000.0
         self.anchor_pos = fresh_sec
@@ -2438,6 +2492,8 @@ class SpotifyMiniWindow(Gtk.Window):
         GLib.idle_add(lambda: self._apply_status_and_osd(status, is_user_action))
 
     def _apply_status_and_osd(self, status, is_user_action):
+        if getattr(self, "_loading", False):
+            return False
         self._apply_status(status)
         if status == "Playing":
             fresh_us = self.mpris.get_fresh_position()

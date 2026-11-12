@@ -35,6 +35,7 @@ class MPRISManager:
         self.length_us = 0
         self.track_id = ""
         self.track_uri = ""
+        self.defer_covers = False  # set while the UI walks through intermediate tracks
         self.shuffle = False
         self.loop_status = "None"
 
@@ -305,7 +306,8 @@ class MPRISManager:
         new_art_url = meta.get("mpris:artUrl", "")
         if new_art_url != self.art_url or track_changed:
             self.art_url = new_art_url
-            self._download_cover_async(new_art_url)
+            if not self.defer_covers:
+                self._download_cover_async(new_art_url)
 
         return track_changed
 

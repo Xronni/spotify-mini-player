@@ -155,6 +155,28 @@ scale.vol-scale:active slider {
     border-radius: 14px;
 }
 
+/* Loading state while Spotify is being moved to a queue entry */
+.cover-loading-veil {
+    border-radius: 14px;
+    background-color: rgba(12, 12, 16, 0.62);
+}
+
+.cover-loading-veil spinner {
+    color: #1ed760;
+    min-width: 28px;
+    min-height: 28px;
+}
+
+.track-artist.loading {
+    color: #1ed760;
+    opacity: 0.85;
+}
+
+scale.seek-bar.loading,
+.time-label.loading {
+    opacity: 0.35;
+}
+
 /* Track information */
 .track-title {
     font-size: 13.5px;
