@@ -607,8 +607,11 @@ button.theme-swatch {
     min-height: 16px;
     padding: 0;
     margin: 0;
-    border-radius: 9999px;
+    border-radius: 10px;
     border: 2px solid alpha(@smp_fg, 0.25);
+    /* With the default border-box clip GTK paints a gradient under the translucent ring as a
+       rounded square; clipping to the padding box keeps every swatch a clean circle. */
+    background-clip: padding-box;
     box-shadow: none;
     transition: border-color 150ms ease;
 }
