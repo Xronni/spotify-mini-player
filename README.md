@@ -37,6 +37,7 @@
 * 👁️ **Intelligent OSD HUD Mode:** Pops up smoothly when tracks change or media keys are pressed, and fades out automatically after 3.5 seconds. Automatically hides when Spotify Desktop is in focus to avoid screen clutter.
 * 📌 **Always-on-Top Pinning:** Pin button keeps the player always visible above other windows.
 * 🌍 **Seamless Auto-Localization (i18n):** Automatically detects Spotify's active UI language (`ru`, `en`, `de`, `es`, `fr`) and auto-restarts instantly on language change.
+* 🎨 **Switchable Styles:** Palette button in the top bar opens four styles — Light, Native (default glass), matte Black, and From cover, which tints the card with the colours of the current track's artwork. The Spotify-green accent stays the same in every style; the choice is remembered.
 * 🫧 **Glassmorphism Aesthetic:** Dark frosted glass theme (`rgba(18, 18, 22, 0.85)`), animated audio visualizer bars, and smooth revealer animations.
 
 ---
@@ -110,6 +111,7 @@ sudo apt install -f  # automatically install dependencies if needed
 * 👁️ **Умный OSD HUD режим:** Плавное всплывание при переключении треков или паузе глобальными горячими клавишами. Автоскрытие через 3.5 секунды. Автоматически скрывается, когда развернуто основное окно Spotify.
 * 📌 **Закрепление поверх всех окон (Pin):** Фиксация мини-плеера на экране в любой удобной позиции.
 * 🌍 **Автоматическая локализация (i18n):** Распознавание языка интерфейса Spotify (`ru`, `en`, `de`, `es`, `fr`) с мгновенным автоперезапуском при смене языка в настройках Spotify.
+* 🎨 **Переключаемые стили:** Кнопка-палитра в верхней панели открывает четыре стиля — Светлый, Нативный (стекло по умолчанию), матовый Чёрный и «По обложке», который окрашивает карточку в цвета обложки текущего трека. Акцент — зелёный Spotify — во всех стилях один; выбор запоминается.
 * 🫧 **Стильный дизайн (Glassmorphism):** Полупрозрачное матовое стекло, тонкие границы, акцентная анимация частот и плавное раскрытие очереди.
 
 ---

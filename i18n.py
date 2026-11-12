@@ -46,6 +46,11 @@ MESSAGES = {
         "updating": "Updating queue...",
         "single": "Single",
         "refresh_queue": "Refresh queue",
+        "theme_tooltip": "Style: {name}",
+        "theme_light": "Light",
+        "theme_native": "Native",
+        "theme_black": "Black",
+        "theme_cover": "From cover",
     },
     "ru": {
         "queue_title": "Очередь воспроизведения",
@@ -85,6 +90,11 @@ MESSAGES = {
         "updating": "Обновление очереди...",
         "single": "Сингл",
         "refresh_queue": "Обновить очередь",
+        "theme_tooltip": "Стиль: {name}",
+        "theme_light": "Светлый",
+        "theme_native": "Нативный",
+        "theme_black": "Чёрный",
+        "theme_cover": "По обложке",
     },
     "de": {
         "queue_title": "Warteschlange",
@@ -124,6 +134,11 @@ MESSAGES = {
         "updating": "Warteschlange wird aktualisiert...",
         "single": "Single",
         "refresh_queue": "Warteschlange aktualisieren",
+        "theme_tooltip": "Stil: {name}",
+        "theme_light": "Hell",
+        "theme_native": "Nativ",
+        "theme_black": "Schwarz",
+        "theme_cover": "Nach Cover",
     },
     "es": {
         "queue_title": "Cola de reproducción",
@@ -163,6 +178,11 @@ MESSAGES = {
         "updating": "Actualizando cola...",
         "single": "Sencillo",
         "refresh_queue": "Actualizar cola",
+        "theme_tooltip": "Estilo: {name}",
+        "theme_light": "Claro",
+        "theme_native": "Nativo",
+        "theme_black": "Negro",
+        "theme_cover": "Según portada",
     },
     "fr": {
         "queue_title": "File d'attente",
@@ -202,6 +222,11 @@ MESSAGES = {
         "updating": "Mise à jour de la file...",
         "single": "Single",
         "refresh_queue": "Actualiser la file d'attente",
+        "theme_tooltip": "Style : {name}",
+        "theme_light": "Clair",
+        "theme_native": "Natif",
+        "theme_black": "Noir",
+        "theme_cover": "Selon la pochette",
     }
 }
 

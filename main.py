@@ -21,6 +21,7 @@ from visualizer import VisualizerWidget
 from queue_manager import QueueManager, is_valid_name, is_local_key
 import i18n
 from i18n import t
+import themes
 
 SPOTIFY_LOGO_PATH = "/usr/share/spotify/icons/spotify-linux-128.png"
 CONFIG_DIR = os.path.expanduser("~/.config/spotify-mini-player")
@@ -478,7 +479,9 @@ class SpotifyMiniWindow(Gtk.Window):
         # Window Position Persistence
         self.saved_x = None
         self.saved_y = None
+        self.theme_name = themes.DEFAULT_THEME
         self._load_config()
+        self.theme_mgr = themes.ThemeManager(self.theme_name)
 
         self.hide_timer_id = None
         self.fade_timer_id = None
@@ -526,6 +529,8 @@ class SpotifyMiniWindow(Gtk.Window):
                     data = json.load(f)
                     self.saved_x = data.get("x")
                     self.saved_y = data.get("y")
+                    if data.get("theme") in themes.THEMES:
+                        self.theme_name = data["theme"]
                     self.is_pinned = False  # Reset pin state on restart as requested
             except Exception as e:
                 print(f"Failed to load config: {e}")
@@ -535,7 +540,8 @@ class SpotifyMiniWindow(Gtk.Window):
             data = {
                 "x": self.saved_x,
                 "y": self.saved_y,
-                "pinned": False  # Always reset pin state across restarts
+                "pinned": False,  # Always reset pin state across restarts
+                "theme": self.theme_name
             }
             with open(CONFIG_FILE, "w") as f:
                 json.dump(data, f)
@@ -621,7 +627,18 @@ class SpotifyMiniWindow(Gtk.Window):
         self.version_btn.set_cursor_from_name("pointer")
         self.version_btn.set_tooltip_text(f"GitHub: Xronni/spotify-mini-player (v{APP_VERSION})")
         self.version_btn.connect("clicked", open_github_repo)
-        top_bar.append(self.version_btn)
+
+        # The theme picker swaps in for the version badge while it is open
+        self.center_stack = Gtk.Stack()
+        self.center_stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self.center_stack.set_transition_duration(150)
+        self.center_stack.set_valign(Gtk.Align.CENTER)
+        self.center_stack.set_hhomogeneous(False)
+        self.center_stack.set_interpolate_size(True)
+        self.center_stack.add_named(self.version_btn, "version")
+        self.center_stack.add_named(self._build_theme_picker(), "themes")
+        self.center_stack.set_visible_child_name("version")
+        top_bar.append(self.center_stack)
 
         spacer2 = Gtk.Box()
         spacer2.set_hexpand(True)
@@ -632,6 +649,13 @@ class SpotifyMiniWindow(Gtk.Window):
         # Right Action Buttons (Queue, Pin, Raise, Close)
         right_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         right_box.set_valign(Gtk.Align.CENTER)
+
+        # Theme (style) picker toggle
+        self.theme_btn = Gtk.Button.new_from_icon_name("preferences-desktop-appearance-symbolic")
+        self.theme_btn.add_css_class("icon-btn")
+        self.theme_btn.connect("clicked", self._toggle_theme_picker)
+        right_box.append(self.theme_btn)
+        self._update_theme_ui()
 
         # Queue Dropdown toggle button
         self.queue_btn = Gtk.Button.new_from_icon_name("view-list-symbolic")
@@ -909,8 +933,56 @@ class SpotifyMiniWindow(Gtk.Window):
 
         self.stack.add_named(offline_box, "offline")
 
+    def _build_theme_picker(self):
+        picker = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        picker.add_css_class("theme-picker")
+        picker.set_valign(Gtk.Align.CENTER)
+        picker.set_halign(Gtk.Align.CENTER)
+        self.theme_swatches = {}
+        for name in themes.THEMES:
+            sw = Gtk.Button()
+            sw.add_css_class("theme-swatch")
+            sw.add_css_class(f"swatch-{name}")
+            sw.set_size_request(16, 16)
+            sw.set_valign(Gtk.Align.CENTER)
+            sw.set_cursor_from_name("pointer")
+            sw.connect("clicked", lambda b, n=name: self._on_theme_selected(n))
+            picker.append(sw)
+            self.theme_swatches[name] = sw
+        return picker
+
+    def _toggle_theme_picker(self, button=None):
+        if self.center_stack.get_visible_child_name() == "themes":
+            self._close_theme_picker()
+        else:
+            self.center_stack.set_visible_child_name("themes")
+            self.theme_btn.add_css_class("picker-active")
+
+    def _close_theme_picker(self):
+        if not hasattr(self, "center_stack"):
+            return
+        self.center_stack.set_visible_child_name("version")
+        self.theme_btn.remove_css_class("picker-active")
+
+    def _on_theme_selected(self, name):
+        if self.theme_mgr.set_theme(name):
+            self.theme_name = name
+            self._save_config()
+        self._update_theme_ui()
+
+    def _update_theme_ui(self):
+        if hasattr(self, "theme_btn"):
+            self.theme_btn.set_tooltip_text(t("theme_tooltip", name=t(f"theme_{self.theme_name}")))
+        for name, sw in getattr(self, "theme_swatches", {}).items():
+            sw.set_tooltip_text(t(f"theme_{name}"))
+            if name == self.theme_name:
+                sw.add_css_class("selected")
+            else:
+                sw.remove_css_class("selected")
+
     def _setup_events(self):
         self.connect("close-request", self._on_close_request)
+        self.connect("notify::visible", lambda w, p: None if w.get_visible() else self._close_theme_picker())
         self.connect("realize", self._on_realize)
 
         motion = Gtk.EventControllerMotion()
@@ -2208,6 +2280,7 @@ class SpotifyMiniWindow(Gtk.Window):
             self.launch_btn.set_label(t("launch_spotify"))
         self._update_volume_icon(self.current_volume)
         self._update_playback_options_ui()
+        self._update_theme_ui()
         self._rebuild_queue_ui()
 
     def _on_mouse_enter(self, controller, x, y):
@@ -2572,7 +2645,9 @@ class SpotifyMiniWindow(Gtk.Window):
             self.scale.set_value(self.anchor_pos)
             self.pos_label.set_text(format_time(self.anchor_pos))
 
-        if self.mpris.local_art_path and os.path.exists(self.mpris.local_art_path):
+        has_art = bool(self.mpris.local_art_path and os.path.exists(self.mpris.local_art_path))
+        self.theme_mgr.set_cover(self.mpris.local_art_path if has_art else None)
+        if has_art:
             try:
                 pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(self.mpris.local_art_path, 84, 84, True)
                 paintable = Gdk.Texture.new_for_pixbuf(pixbuf)
@@ -2670,20 +2745,22 @@ class SpotifyMiniApp(Adw.Application):
         return 0
 
     def do_activate(self):
-        style_mgr = Adw.StyleManager.get_default()
-        style_mgr.set_color_scheme(Adw.ColorScheme.FORCE_DARK)
-
-        css_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "style.css")
-        if os.path.exists(css_path):
-            provider = Gtk.CssProvider()
-            provider.load_from_path(css_path)
-            Gtk.StyleContext.add_provider_for_display(
-                Gdk.Display.get_default(),
-                provider,
-                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
-            )
-
         if not self.win:
+            # Runs once: every CLI call (--next, --show, ...) activates the app again, and re-adding
+            # the stylesheet or forcing dark here would stack providers and undo the light theme.
+            style_mgr = Adw.StyleManager.get_default()
+            style_mgr.set_color_scheme(Adw.ColorScheme.FORCE_DARK)
+
+            css_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "style.css")
+            if os.path.exists(css_path):
+                provider = Gtk.CssProvider()
+                provider.load_from_path(css_path)
+                Gtk.StyleContext.add_provider_for_display(
+                    Gdk.Display.get_default(),
+                    provider,
+                    Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+                )
+
             self.hold()
             self.win = SpotifyMiniWindow(application=self)
         else:

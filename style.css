@@ -1,5 +1,28 @@
 /* Spotify Mini Player - Modern Translucent Floating Card */
 
+/* Colour tokens. Every colour below goes through these names; themes.py redefines the
+   non-accent ones from a higher-priority provider (light / native / black / cover). The values
+   here are the native theme and act as the fallback. The accent is never themed. */
+@define-color smp_accent #1ed760;
+@define-color smp_accent_hover #24f06e;
+@define-color smp_accent_active #17b34e;
+@define-color smp_accent_deep #1db954;
+@define-color smp_on_accent #000000;
+
+@define-color smp_card_bg rgba(18, 18, 22, 0.85);
+@define-color smp_card_bg2 rgba(18, 18, 22, 0.85);
+@define-color smp_card_border rgba(255, 255, 255, 0.12);
+@define-color smp_fg #ffffff;
+@define-color smp_fg_strong #f4f4f5;
+@define-color smp_fg_soft #d4d4d8;
+@define-color smp_fg_dim #a1a1aa;
+@define-color smp_fg_muted #71717a;
+@define-color smp_icon #8e8e93;
+@define-color smp_knob #ffffff;
+@define-color smp_eq_paused #52525b;
+@define-color smp_cover_bg rgba(0, 0, 0, 0.3);
+@define-color smp_veil rgba(12, 12, 16, 0.62);
+
 window.mini-player-window {
     background-color: transparent;
     background: transparent;
@@ -7,10 +30,11 @@ window.mini-player-window {
 
 /* Translucent Glassmorphic Card (15% transparency) */
 .mini-player-card {
-    background-color: rgba(18, 18, 22, 0.85);
+    background-color: transparent;
+    background-image: linear-gradient(135deg, @smp_card_bg, @smp_card_bg2);
     border-radius: 18px;
     padding: 10px 14px 12px 14px;
-    border: 1px solid rgba(255, 255, 255, 0.12);
+    border: 1px solid @smp_card_border;
 }
 
 /* Top bar inside the card */
@@ -28,9 +52,9 @@ window.mini-player-window {
 /* Volume Control in Top Bar (Next to visualizer) */
 .vol-box {
     padding: 2px 6px;
-    background-color: rgba(255, 255, 255, 0.05);
+    background-color: alpha(@smp_fg, 0.05);
     border-radius: 9999px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border: 1px solid alpha(@smp_fg, 0.08);
     min-height: 24px;
 }
 
@@ -40,13 +64,13 @@ window.mini-player-window {
     min-height: 20px;
     padding: 1px;
     background-color: transparent;
-    color: #a1a1aa;
+    color: @smp_fg_dim;
     border: none;
     transition: color 150ms ease;
 }
 
 .vol-btn:hover {
-    color: #1ed760;
+    color: @smp_accent;
 }
 
 scale.vol-scale {
@@ -57,7 +81,7 @@ scale.vol-scale {
 }
 
 scale.vol-scale trough {
-    background-color: rgba(255, 255, 255, 0.15);
+    background-color: alpha(@smp_fg, 0.15);
     border-radius: 9999px;
     min-height: 4px;
 }
@@ -68,7 +92,7 @@ scale.vol-scale:active trough {
 }
 
 scale.vol-scale highlight {
-    background: #1ed760;
+    background: @smp_accent;
     border-radius: 9999px;
 }
 
@@ -77,7 +101,7 @@ scale.vol-scale slider {
     min-height: 8px;
     margin: -2px;
     border-radius: 9999px;
-    background-color: #ffffff;
+    background-color: @smp_knob;
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
     opacity: 0;
     transition: opacity 100ms ease;
@@ -98,28 +122,28 @@ scale.vol-scale:active slider {
     min-height: 24px;
     padding: 3px;
     background-color: transparent;
-    color: #8e8e93;
+    color: @smp_icon;
     border: none;
     transition: background-color 150ms ease, color 150ms ease;
 }
 
 .icon-btn:hover {
-    background-color: rgba(255, 255, 255, 0.15);
-    color: #ffffff;
+    background-color: alpha(@smp_fg, 0.15);
+    color: @smp_fg;
 }
 
 .icon-btn:active {
-    background-color: rgba(255, 255, 255, 0.25);
+    background-color: alpha(@smp_fg, 0.25);
 }
 
 .icon-btn.pinned-active {
-    color: #1ed760;
-    background-color: rgba(30, 215, 96, 0.2);
+    color: @smp_accent;
+    background-color: alpha(@smp_accent, 0.2);
 }
 
 .icon-btn.queue-active {
-    color: #1ed760;
-    background-color: rgba(30, 215, 96, 0.2);
+    color: @smp_accent;
+    background-color: alpha(@smp_accent, 0.2);
 }
 
 /* Equalizer Bars */
@@ -129,14 +153,14 @@ scale.vol-scale:active slider {
 }
 
 .eq-bar {
-    background-color: #1ed760;
+    background-color: @smp_accent;
     border-radius: 9999px;
     min-width: 3px;
     margin: 0 1px;
 }
 
 .eq-bar.paused {
-    background-color: #52525b;
+    background-color: @smp_eq_paused;
     opacity: 0.4;
 }
 
@@ -145,8 +169,8 @@ scale.vol-scale:active slider {
     min-width: 84px;
     min-height: 84px;
     border-radius: 14px;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    background-color: rgba(0, 0, 0, 0.3);
+    border: 1px solid alpha(@smp_fg, 0.1);
+    background-color: @smp_cover_bg;
 }
 
 .cover-picture {
@@ -158,23 +182,23 @@ scale.vol-scale:active slider {
 /* Loading state while Spotify is being moved to a queue entry */
 .cover-loading-veil {
     border-radius: 14px;
-    background-color: rgba(12, 12, 16, 0.62);
+    background-color: @smp_veil;
 }
 
 .cover-loading-veil spinner {
-    color: #1ed760;
+    color: @smp_accent;
     min-width: 28px;
     min-height: 28px;
 }
 
 .track-artist.loading {
-    color: #1ed760;
+    color: @smp_accent;
     opacity: 0.85;
 }
 
 
 .queue-loading-spinner {
-    color: #1ed760;
+    color: @smp_accent;
     min-width: 16px;
     min-height: 16px;
 }
@@ -188,21 +212,21 @@ scale.seek-bar.loading,
 .track-title {
     font-size: 13.5px;
     font-weight: 700;
-    color: #ffffff;
+    color: @smp_fg;
     letter-spacing: -0.2px;
 }
 
 .track-artist {
     font-size: 11.5px;
     font-weight: 500;
-    color: #a1a1aa;
+    color: @smp_fg_dim;
 }
 
 .time-label {
     font-size: 10px;
     font-weight: 500;
     font-family: monospace, monospace;
-    color: #71717a;
+    color: @smp_fg_muted;
 }
 
 /* Media Controls */
@@ -212,28 +236,28 @@ scale.seek-bar.loading,
     min-height: 28px;
     padding: 4px;
     background-color: transparent;
-    color: #d4d4d8;
+    color: @smp_fg_soft;
     border: none;
     transition: background-color 150ms ease, color 150ms ease;
 }
 
 .control-btn:hover {
-    background-color: rgba(255, 255, 255, 0.15);
-    color: #ffffff;
+    background-color: alpha(@smp_fg, 0.15);
+    color: @smp_fg;
 }
 
 .control-btn:active {
-    background-color: rgba(255, 255, 255, 0.25);
+    background-color: alpha(@smp_fg, 0.25);
 }
 
 .control-btn.active-control {
-    color: #1ed760;
-    background-color: rgba(30, 215, 96, 0.15);
+    color: @smp_accent;
+    background-color: alpha(@smp_accent, 0.15);
 }
 
 .control-btn.active-control:hover {
-    color: #24f06e;
-    background-color: rgba(30, 215, 96, 0.25);
+    color: @smp_accent_hover;
+    background-color: alpha(@smp_accent, 0.25);
 }
 
 /* Prominent Play / Pause Button */
@@ -242,24 +266,24 @@ scale.seek-bar.loading,
     min-width: 32px;
     min-height: 32px;
     padding: 4px;
-    background-color: #1ed760;
-    color: #000000;
+    background-color: @smp_accent;
+    color: @smp_on_accent;
     border: 2px solid transparent;
     transition: background-color 150ms ease, border-color 150ms ease;
 }
 
 .play-btn:hover {
-    background-color: #24f06e;
-    color: #000000;
-    border-color: rgba(255, 255, 255, 0.4);
+    background-color: @smp_accent_hover;
+    color: @smp_on_accent;
+    border-color: alpha(@smp_fg, 0.4);
 }
 
 .play-btn:active {
-    background-color: #17b34e;
+    background-color: @smp_accent_active;
 }
 
 .play-btn.playing {
-    border-color: rgba(255, 255, 255, 0.2);
+    border-color: alpha(@smp_fg, 0.2);
 }
 
 /* Progress Slider (GtkScale) */
@@ -270,7 +294,7 @@ scale.seek-bar {
 }
 
 scale.seek-bar trough {
-    background-color: rgba(255, 255, 255, 0.14);
+    background-color: alpha(@smp_fg, 0.14);
     border-radius: 9999px;
     min-height: 4px;
     transition: min-height 100ms ease;
@@ -281,7 +305,7 @@ scale.seek-bar:hover trough {
 }
 
 scale.seek-bar highlight {
-    background: linear-gradient(90deg, #1db954 0%, #1ed760 100%);
+    background: linear-gradient(90deg, @smp_accent_deep 0%, @smp_accent 100%);
     border-radius: 9999px;
 }
 
@@ -290,7 +314,7 @@ scale.seek-bar slider {
     min-height: 8px;
     margin: -2px;
     border-radius: 9999px;
-    background-color: #ffffff;
+    background-color: @smp_knob;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
     opacity: 0;
     transition: opacity 100ms ease;
@@ -309,13 +333,13 @@ scale.seek-bar:hover slider {
 .queue-panel {
     margin-top: 10px;
     padding-top: 8px;
-    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    border-top: 1px solid alpha(@smp_fg, 0.08);
 }
 
 .queue-title {
     font-size: 11px;
     font-weight: 700;
-    color: #8e8e93;
+    color: @smp_icon;
     text-transform: uppercase;
     letter-spacing: 0.6px;
 }
@@ -323,7 +347,7 @@ scale.seek-bar:hover slider {
 .queue-section-title {
     font-size: 9.5px;
     font-weight: 700;
-    color: #71717a;
+    color: @smp_fg_muted;
     text-transform: uppercase;
     letter-spacing: 0.8px;
     margin-top: 6px;
@@ -332,7 +356,7 @@ scale.seek-bar:hover slider {
 
 
 .queue-header-spinner {
-    color: #1ed760;
+    color: @smp_accent;
     min-width: 16px;
     min-height: 16px;
     margin-right: 6px;
@@ -348,13 +372,13 @@ scale.seek-bar:hover slider {
 .queue-current-row {
     padding: 7px 10px;
     border-radius: 10px;
-    background-color: rgba(30, 215, 96, 0.12);
-    border: 1px solid rgba(30, 215, 96, 0.35);
+    background-color: alpha(@smp_accent, 0.12);
+    border: 1px solid alpha(@smp_accent, 0.35);
     margin-bottom: 6px;
 }
 
 .queue-current-icon {
-    color: #1ed760;
+    color: @smp_accent;
     min-width: 16px;
     min-height: 16px;
 }
@@ -362,20 +386,20 @@ scale.seek-bar:hover slider {
 .queue-current-title {
     font-size: 12.5px;
     font-weight: 700;
-    color: #1ed760;
+    color: @smp_accent;
 }
 
 .queue-current-artist {
     font-size: 11px;
     font-weight: 500;
-    color: #d4d4d8;
+    color: @smp_fg_soft;
 }
 
 .queue-playing-badge {
     font-size: 9.5px;
     font-weight: 700;
-    color: #1ed760;
-    background-color: rgba(30, 215, 96, 0.2);
+    color: @smp_accent;
+    background-color: alpha(@smp_accent, 0.2);
     padding: 2px 7px;
     border-radius: 9999px;
     letter-spacing: 0.4px;
@@ -392,55 +416,55 @@ scale.seek-bar:hover slider {
 }
 
 .queue-row:hover {
-    background-color: rgba(255, 255, 255, 0.08);
-    border-color: rgba(255, 255, 255, 0.05);
+    background-color: alpha(@smp_fg, 0.08);
+    border-color: alpha(@smp_fg, 0.05);
 }
 
 .queue-row:active {
-    background-color: rgba(255, 255, 255, 0.14);
+    background-color: alpha(@smp_fg, 0.14);
 }
 
 .queue-num {
     font-size: 11px;
     font-weight: 600;
-    color: #71717a;
+    color: @smp_fg_muted;
     min-width: 32px;
     font-variant-numeric: tabular-nums;
 }
 
 .queue-current-num {
-    color: #1ed760;
+    color: @smp_accent;
 }
 
 .queue-row:hover .queue-num {
-    color: #1ed760;
+    color: @smp_accent;
 }
 
 .queue-item-title {
     font-size: 12px;
     font-weight: 600;
-    color: #f4f4f5;
+    color: @smp_fg_strong;
 }
 
 .queue-row:hover .queue-item-title {
-    color: #1ed760;
+    color: @smp_accent;
 }
 
 .queue-item-artist {
     font-size: 10.5px;
     font-weight: 400;
-    color: #a1a1aa;
+    color: @smp_fg_dim;
 }
 
 .queue-play-hint {
-    color: #71717a;
+    color: @smp_fg_muted;
     opacity: 0;
     transition: opacity 100ms ease, color 100ms ease;
 }
 
 .queue-row:hover .queue-play-hint {
     opacity: 1;
-    color: #1ed760;
+    color: @smp_accent;
 }
 
 /* History Tracks Section (Ранее играли) */
@@ -455,17 +479,17 @@ scale.seek-bar:hover slider {
 }
 
 .queue-history-row:hover {
-    background-color: rgba(255, 255, 255, 0.07);
-    border-color: rgba(255, 255, 255, 0.05);
+    background-color: alpha(@smp_fg, 0.07);
+    border-color: alpha(@smp_fg, 0.05);
     opacity: 1.0;
 }
 
 .queue-history-row:active {
-    background-color: rgba(255, 255, 255, 0.12);
+    background-color: alpha(@smp_fg, 0.12);
 }
 
 .queue-history-icon {
-    color: #71717a;
+    color: @smp_fg_muted;
     min-width: 15px;
     min-height: 15px;
     opacity: 0;
@@ -473,32 +497,33 @@ scale.seek-bar:hover slider {
 }
 
 .queue-history-row:hover .queue-history-icon {
-    color: #1ed760;
+    color: @smp_accent;
     opacity: 1.0;
 }
 
 .queue-history-title {
     font-size: 11.5px;
     font-weight: 500;
-    color: #d4d4d8;
+    color: @smp_fg_soft;
 }
 
 .queue-history-row:hover .queue-history-title {
-    color: #1ed760;
+    color: @smp_accent;
 }
 
 .queue-history-artist {
     font-size: 10px;
     font-weight: 400;
-    color: #71717a;
+    color: @smp_fg_muted;
 }
 
 /* Offline state */
 .offline-card {
-    background-color: rgba(18, 18, 22, 0.85);
+    background-color: transparent;
+    background-image: linear-gradient(135deg, @smp_card_bg, @smp_card_bg2);
     border-radius: 18px;
     padding: 20px;
-    border: 1px solid rgba(255, 255, 255, 0.12);
+    border: 1px solid @smp_card_border;
 }
 
 .launch-btn {
@@ -506,26 +531,26 @@ scale.seek-bar:hover slider {
     padding: 7px 20px;
     font-size: 12px;
     font-weight: 700;
-    background-color: #1ed760;
-    color: #000000;
+    background-color: @smp_accent;
+    color: @smp_on_accent;
     border: none;
     transition: background-color 150ms ease;
 }
 
 .launch-btn:hover {
-    background-color: #24f06e;
+    background-color: @smp_accent_hover;
 }
 
 /* Release Version & Repo Link Badge */
 button.version-link,
 .version-link {
-    background-color: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    background-color: alpha(@smp_fg, 0.05);
+    border: 1px solid alpha(@smp_fg, 0.08);
     border-radius: 9999px;
     padding: 2px 10px;
     margin: 0;
     min-height: 24px;
-    color: rgba(255, 255, 255, 0.6);
+    color: alpha(@smp_fg, 0.6);
     font-size: 11px;
     font-weight: 500;
     text-decoration: none;
@@ -534,7 +559,7 @@ button.version-link,
 
 button.version-link label,
 .version-link label {
-    color: rgba(255, 255, 255, 0.6);
+    color: alpha(@smp_fg, 0.6);
     font-size: 11px;
     font-weight: 500;
     text-decoration: none;
@@ -542,20 +567,76 @@ button.version-link label,
 
 button.version-link:hover,
 .version-link:hover {
-    background: rgba(30, 215, 96, 0.12);
-    border-color: rgba(30, 215, 96, 0.3);
-    color: #1ed760;
+    background: alpha(@smp_accent, 0.12);
+    border-color: alpha(@smp_accent, 0.3);
+    color: @smp_accent;
 }
 
 button.version-link:hover label,
 .version-link:hover label {
-    color: #1ed760;
+    color: @smp_accent;
     text-decoration: none;
 }
 
 /* Queue entry picked by the user while Spotify is moved to it (defined last to win over hover) */
 .queue-row.queue-row-picked,
 .queue-history-row.queue-row-picked {
-    background-color: rgba(30, 215, 96, 0.14);
-    border-color: rgba(30, 215, 96, 0.35);
+    background-color: alpha(@smp_accent, 0.14);
+    border-color: alpha(@smp_accent, 0.35);
+}
+
+/* ========================================================================= */
+/* Theme picker (swatches shown in place of the version badge)               */
+/* ========================================================================= */
+
+.icon-btn.picker-active {
+    color: @smp_accent;
+    background-color: alpha(@smp_accent, 0.2);
+}
+
+.theme-picker {
+    padding: 2px 6px;
+    background-color: alpha(@smp_fg, 0.05);
+    border-radius: 9999px;
+    border: 1px solid alpha(@smp_fg, 0.08);
+    min-height: 24px;
+}
+
+button.theme-swatch {
+    min-width: 16px;
+    min-height: 16px;
+    padding: 0;
+    margin: 0;
+    border-radius: 9999px;
+    border: 2px solid alpha(@smp_fg, 0.25);
+    box-shadow: none;
+    transition: border-color 150ms ease;
+}
+
+button.theme-swatch:hover {
+    border-color: alpha(@smp_fg, 0.6);
+}
+
+button.theme-swatch.selected {
+    border-color: @smp_accent;
+}
+
+button.swatch-light {
+    background-color: #f4f4f6;
+    background-image: none;
+}
+
+button.swatch-native {
+    background-color: #2a2a31;
+    background-image: none;
+}
+
+button.swatch-black {
+    background-color: #000000;
+    background-image: none;
+}
+
+button.swatch-cover {
+    background-color: transparent;
+    background-image: linear-gradient(135deg, #f97316 0%, #db2777 50%, #6366f1 100%);
 }
