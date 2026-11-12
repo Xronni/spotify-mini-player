@@ -203,41 +203,107 @@ def is_spotify_active():
     except Exception:
         return False
 
-def is_spotify_on_screen():
-    """Checks if Spotify window is currently restored/visible on the active screen (not minimized)."""
+def _typed_x11():
+    """libX11 handle with explicit prototypes (64-bit safe pointers / window ids)."""
+    x11 = ctypes.CDLL('libX11.so.6')
+    c_ulong_p, c_int_p, c_uint_p = ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_uint)
+    x11.XOpenDisplay.restype = ctypes.c_void_p
+    x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+    x11.XDefaultRootWindow.restype = ctypes.c_ulong
+    x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+    x11.XInternAtom.restype = ctypes.c_ulong
+    x11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+    x11.XFree.argtypes = [ctypes.c_void_p]
+    x11.XGetWindowProperty.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_long, ctypes.c_long,
+                                       ctypes.c_int, ctypes.c_ulong, c_ulong_p, c_int_p, c_ulong_p, c_ulong_p,
+                                       ctypes.POINTER(ctypes.c_void_p)]
+    x11.XGetGeometry.argtypes = [ctypes.c_void_p, ctypes.c_ulong, c_ulong_p, c_int_p, c_int_p,
+                                 c_uint_p, c_uint_p, c_uint_p, c_uint_p]
+    x11.XTranslateCoordinates.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_int, ctypes.c_int,
+                                          c_int_p, c_int_p, c_ulong_p]
+    return x11
+
+def _x11_prop_longs(x11, disp, win, name):
+    atom = x11.XInternAtom(disp, name, False)
+    a_type, a_fmt, nitems, after = ctypes.c_ulong(), ctypes.c_int(), ctypes.c_ulong(), ctypes.c_ulong()
+    prop = ctypes.c_void_p()
+    res = x11.XGetWindowProperty(disp, win, atom, 0, 4096, False, 0, ctypes.byref(a_type), ctypes.byref(a_fmt),
+                                 ctypes.byref(nitems), ctypes.byref(after), ctypes.byref(prop))
+    vals = []
+    if res == 0 and prop.value:
+        if a_fmt.value == 32 and nitems.value:
+            vals = list((ctypes.c_ulong * nitems.value).from_address(prop.value))
+        x11.XFree(prop)
+    return vals
+
+def _x11_window_rect(x11, disp, root, win):
+    r_root, gx, gy = ctypes.c_ulong(), ctypes.c_int(), ctypes.c_int()
+    w, h, border, depth = ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint()
+    if not x11.XGetGeometry(disp, win, ctypes.byref(r_root), ctypes.byref(gx), ctypes.byref(gy),
+                            ctypes.byref(w), ctypes.byref(h), ctypes.byref(border), ctypes.byref(depth)):
+        return None
+    rx, ry, child = ctypes.c_int(), ctypes.c_int(), ctypes.c_ulong()
+    if not x11.XTranslateCoordinates(disp, win, root, 0, 0, ctypes.byref(rx), ctypes.byref(ry), ctypes.byref(child)):
+        return None
+    return (rx.value, ry.value, w.value, h.value)
+
+def spotify_visible_fraction(exclude_xid=0):
+    """Share (0..1) of the Spotify window that is actually visible: not minimized, on the current
+    desktop and not covered by other windows stacked above it (the mini player itself is ignored).
+    A restored Spotify window buried under other windows counts as hidden."""
+    sp = find_spotify_window()
+    if not sp or is_window_minimized(sp):
+        return 0.0
     try:
-        sp = find_spotify_window()
-        if not sp:
-            return False
-        if is_window_minimized(sp):
-            return False
-        x11 = ctypes.CDLL('libX11.so.6')
+        x11 = _typed_x11()
         disp = x11.XOpenDisplay(None)
         if not disp:
-            return False
-        root = x11.XDefaultRootWindow(disp)
-        atom_cur_desk = x11.XInternAtom(disp, b"_NET_CURRENT_DESKTOP", False)
-        atom_wm_desk = x11.XInternAtom(disp, b"_NET_WM_DESKTOP", False)
-        actual_type, actual_format, nitems, bytes_after = ctypes.c_ulong(), ctypes.c_int(), ctypes.c_ulong(), ctypes.c_ulong()
-        
-        prop = ctypes.c_void_p()
-        res = x11.XGetWindowProperty(disp, root, atom_cur_desk, 0, 1, False, 0, ctypes.byref(actual_type), ctypes.byref(actual_format), ctypes.byref(nitems), ctypes.byref(bytes_after), ctypes.byref(prop))
-        cur_desk = (ctypes.c_ulong * 1).from_address(prop.value)[0] if (res == 0 and prop.value) else 0
-        if prop.value:
-            x11.XFree(prop)
+            return 0.0
+        try:
+            root = x11.XDefaultRootWindow(disp)
+            cur = _x11_prop_longs(x11, disp, root, b"_NET_CURRENT_DESKTOP")
+            cur_desk = cur[0] if cur else 0
 
-        prop = ctypes.c_void_p()
-        res = x11.XGetWindowProperty(disp, sp, atom_wm_desk, 0, 1, False, 0, ctypes.byref(actual_type), ctypes.byref(actual_format), ctypes.byref(nitems), ctypes.byref(bytes_after), ctypes.byref(prop))
-        sp_desk = (ctypes.c_ulong * 1).from_address(prop.value)[0] if (res == 0 and prop.value) else 0
-        if prop.value:
-            x11.XFree(prop)
-        
-        x11.XCloseDisplay(disp)
-        if sp_desk not in (cur_desk, 0xffffffff):
-            return False
-        return True
+            def on_current_desktop(w):
+                d = _x11_prop_longs(x11, disp, w, b"_NET_WM_DESKTOP")
+                return not d or d[0] in (cur_desk, 0xFFFFFFFF)
+
+            if not on_current_desktop(sp):
+                return 0.0
+            sp_rect = _x11_window_rect(x11, disp, root, sp)
+            if not sp_rect or sp_rect[2] < 2 or sp_rect[3] < 2:
+                return 0.0
+
+            stacking = _x11_prop_longs(x11, disp, root, b"_NET_CLIENT_LIST_STACKING")  # bottom -> top
+            above = stacking[stacking.index(sp) + 1:] if sp in stacking else []
+            atom_hidden = x11.XInternAtom(disp, b"_NET_WM_STATE_HIDDEN", False)
+            covers = []
+            for w in above:
+                if w == exclude_xid:
+                    continue
+                if atom_hidden in _x11_prop_longs(x11, disp, w, b"_NET_WM_STATE"):
+                    continue
+                if not on_current_desktop(w):
+                    continue
+                r = _x11_window_rect(x11, disp, root, w)
+                if r and r[2] > 0 and r[3] > 0:
+                    covers.append(r)
+        finally:
+            x11.XCloseDisplay(disp)
+
+        sx, sy, sw, sh = sp_rect
+        n = 24
+        visible = 0
+        for i in range(n):
+            px = sx + (i + 0.5) * sw / n
+            for j in range(n):
+                py = sy + (j + 0.5) * sh / n
+                if not any(cx <= px < cx + cw and cy <= py < cy + ch for cx, cy, cw, ch in covers):
+                    visible += 1
+        return visible / float(n * n)
     except Exception:
-        return False
+        return 0.0
 
 def get_window_pos(xid):
     """Gets absolute root screen coordinates of window."""
@@ -407,6 +473,7 @@ class SpotifyMiniWindow(Gtk.Window):
         self._queue_nav = None
         self._queue_nav_timer = None
         self._window_poll_pause_until = 0.0
+        self._forced_show_until = 0.0
         self._was_pinned_before_spotify = False
 
         # Queue Manager
@@ -1020,6 +1087,8 @@ class SpotifyMiniWindow(Gtk.Window):
     # queue entry is done by stepping Next/Previous so the playlist context
     # (order, shuffle, local files, repeat) is preserved.
     # ------------------------------------------------------------------
+
+    SPOTIFY_VISIBLE_THRESHOLD = 0.15  # share of the Spotify window that must be uncovered
 
     QUEUE_NAV_MAX_STEPS = 150
     QUEUE_NAV_STEP_TIMEOUT = 1.5
@@ -1649,11 +1718,17 @@ class SpotifyMiniWindow(Gtk.Window):
         if self._is_navigating():
             return True
 
-        sp_on_screen = is_spotify_on_screen() or is_spotify_active()
+        surface = self.get_surface()
+        own_xid = surface.get_xid() if isinstance(surface, GdkX11.X11Surface) else 0
+        # Spotify counts as "on screen" only when it is focused or really visible, not when it is
+        # merely restored but buried under other windows.
+        sp_on_screen = is_spotify_active() or spotify_visible_fraction(own_xid) >= self.SPOTIFY_VISIBLE_THRESHOLD
+        forced_show = time.time() < self._forced_show_until
 
         if sp_on_screen:
-            # If Spotify desktop is open on screen, hide the mini player (unless user is actively scrubbing or hovering it)
-            if self.get_visible() and not self.is_hovered and not self.is_scrubbing:
+            # If Spotify desktop is open on screen, hide the mini player (unless user is actively scrubbing or hovering it,
+            # or the HUD was just explicitly shown by a user action such as a media key)
+            if self.get_visible() and not self.is_hovered and not self.is_scrubbing and not forced_show:
                 self._cancel_hide_timer()
                 self._cancel_fade()
                 self._was_pinned_before_spotify = self.is_pinned
@@ -1963,6 +2038,9 @@ class SpotifyMiniWindow(Gtk.Window):
         # If user is working actively in Spotify, do NOT pop up unless forced
         if not force and is_spotify_active():
             return
+        if force:
+            # Explicit user action: keep the HUD up for its display time even if Spotify is on screen
+            self._forced_show_until = time.time() + duration_ms / 1000.0
 
         self._cancel_fade()
         self.set_opacity(1.0)
