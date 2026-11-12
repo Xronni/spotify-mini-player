@@ -880,7 +880,31 @@ class QueueManager:
             return local_key
         return uri.split(":")[-1].split("/")[-1].split("?")[0]
 
+    _CRITERIA_FIELDS = {
+        "added_at": "ADDED_AT", "title": "TITLE", "name": "TITLE", "artist_name": "ARTIST",
+        "artist": "ARTIST", "album_title": "ALBUM", "album": "ALBUM", "duration": "DURATION",
+        "added_by": "ADDED_BY", "added_by_display_name": "ADDED_BY",
+    }
+
     def _get_playlist_sort_state(self, playlist_id):
+        """Order in which Spotify actually PLAYS the playlist. Taken from the player state
+        (sorting.criteria) when this playlist is the playing context; otherwise falls back to
+        the sort chosen in the playlist view."""
+        restore = self._read_restore_state()
+        if restore and restore.get("context_uri") == f"spotify:playlist:{playlist_id}" and restore.get("has_context_header"):
+            crit = (restore.get("sorting") or "").split(",")[0].strip()
+            if not crit:
+                self._cached_sort_states[playlist_id] = None
+                return None  # original playlist order
+            parts = crit.split()
+            field = self._CRITERIA_FIELDS.get(parts[0].lower())
+            if field:
+                state = {"field": field, "order": parts[1].upper() if len(parts) > 1 else "ASC"}
+                self._cached_sort_states[playlist_id] = state
+                return state
+        return self._get_view_sort_state(playlist_id)
+
+    def _get_view_sort_state(self, playlist_id):
         """Reads user's active sorting preference for playlist_id from Spotify's Browser Local Storage."""
         if not playlist_id:
             return None
@@ -1021,7 +1045,12 @@ class QueueManager:
             order = str(sort_state.get("order", "ASC")).upper()
             reverse = (order == "DESC")
             if field == "ADDED_AT":
-                entries.sort(key=lambda x: (x.get("added_at", 0), (x.get("title") or "").strip().casefold()), reverse=reverse)
+                for pos, e in enumerate(entries):
+                    e["_orig"] = pos
+                entries.sort(key=lambda x: ((x.get("album") or "").strip().casefold(), x["_orig"]))
+                entries.sort(key=lambda x: x.get("added_at", 0), reverse=reverse)
+                for e in entries:
+                    e.pop("_orig", None)
             elif field in ("TITLE", "NAME"):
                 entries.sort(key=lambda x: (
                     (x.get("title") or "").strip().casefold(),
@@ -1380,10 +1409,23 @@ class QueueManager:
                 ctx = c[p:p + ln].decode("utf-8", errors="ignore")
                 track_uri = m_track.group(0).decode("ascii", errors="ignore")
                 if ctx.startswith("spotify:"):
+                    # Playback order of the context: "sorting.criteria" in the context header
+                    # (absent -> Spotify plays the playlist in its original order)
+                    sorting = ""
+                    h = c.find(b"context://" + ctx.encode())
+                    if h != -1:
+                        body = c.find(b"original_index", h)
+                        skey = b"\n\x10sorting.criteria\x12"
+                        j = c.find(skey, h, body if body != -1 else h + 4000)
+                        if j != -1:
+                            sl, sp = decode_varint(c, j + len(skey))
+                            sorting = c[sp:sp + sl].decode("utf-8", errors="ignore")
                     state = {
                         "track_uri": track_uri,
                         "track_key": self._extract_id(track_uri),
                         "context_uri": ctx,
+                        "sorting": sorting,
+                        "has_context_header": h != -1,
                         "mtime": mtime,
                     }
         except Exception as e:

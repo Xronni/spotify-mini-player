@@ -29,6 +29,20 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 APP_VERSION = "1.2.5"
 GITHUB_REPO_URL = "https://github.com/Xronni/spotify-mini-player"
 
+DEBUG_LOG_PATH = os.path.expanduser("~/.cache/spotify-mini-player/debug.log")
+
+def dlog(msg):
+    """Diagnostic log (queue navigation, window show/hide decisions). Rotates at 1 MB."""
+    try:
+        os.makedirs(os.path.dirname(DEBUG_LOG_PATH), exist_ok=True)
+        if os.path.exists(DEBUG_LOG_PATH) and os.path.getsize(DEBUG_LOG_PATH) > 1_000_000:
+            os.replace(DEBUG_LOG_PATH, DEBUG_LOG_PATH + ".1")
+        now = time.time()
+        with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%H:%M:%S', time.localtime(now))}.{int(now * 1000) % 1000:03d} {msg}\n")
+    except Exception:
+        pass
+
 def open_github_repo(widget=None):
     try:
         Gio.AppInfo.launch_default_for_uri(GITHUB_REPO_URL, None)
@@ -1107,6 +1121,7 @@ class SpotifyMiniWindow(Gtk.Window):
         return self._queue_nav is not None or time.time() < self._window_poll_pause_until
 
     def on_user_next_clicked(self, *args):
+        dlog(f"next clicked (now '{self.mpris.title}', status={self.mpris.playback_status})")
         self._finish_queue_navigation(reached=False, resync=False)
         if self.mpris.is_available:
             self._reset_progress_ui()
@@ -1115,6 +1130,7 @@ class SpotifyMiniWindow(Gtk.Window):
         return False
 
     def on_user_prev_clicked(self, *args):
+        dlog(f"prev clicked (now '{self.mpris.title}', status={self.mpris.playback_status})")
         self._finish_queue_navigation(reached=False, resync=False)
         if self.mpris.is_available:
             self._reset_progress_ui()
@@ -1144,10 +1160,16 @@ class SpotifyMiniWindow(Gtk.Window):
 
         if target_idx < 0 or cur_idx < 0:
             # Track position unknown -> only a direct open is possible
+            dlog(f"nav fallback OpenUri: target_idx={target_idx} cur_idx={cur_idx} mpris={self.mpris.track_uri} ({self.mpris.title})")
             self.play_track_silent(uri)
             return
 
         offset = target_idx - cur_idx
+        restore = self.queue_mgr._read_restore_state() or {}
+        dlog(f"nav start target_idx={target_idx} ({tracks[target_idx].get('title') if 0 <= target_idx < len(tracks) else '?'}) "
+             f"cur_idx={cur_idx} ({self.mpris.title}) offset={offset} status={self.mpris.playback_status} "
+             f"shuffle={self.mpris.shuffle} ctx={self.queue_mgr.context_uri} list={len(tracks)} "
+             f"restore_ctx={restore.get('context_uri')} restore_sort={restore.get('sorting')!r}")
         if offset == 0:
             # Clicked the current track: play it from the start
             self.mpris.set_position(0)
@@ -1239,6 +1261,16 @@ class SpotifyMiniWindow(Gtk.Window):
         return False
 
     def _on_queue_nav_poll(self):
+        try:
+            return self._queue_nav_tick()
+        except Exception as e:
+            # Never leave Spotify muted / shuffle-less because of an unexpected error
+            dlog(f"nav error: {e!r}")
+            self._queue_nav_timer = None
+            self._finish_queue_navigation(reached=False)
+            return False
+
+    def _queue_nav_tick(self):
         nav = self._queue_nav
         if not nav:
             self._queue_nav_timer = None
@@ -1271,6 +1303,7 @@ class SpotifyMiniWindow(Gtk.Window):
             # Re-derive our position from what Spotify actually plays (self-correcting walk)
             idx = self.queue_mgr._find_track_idx(key, title)
             nav["pos_idx"] = idx if idx >= 0 else nav["pos_idx"] + nav["direction"]
+            dlog(f"nav landed '{title}' idx={idx} pos={nav['pos_idx']} target={nav['target_idx']} steps={nav['steps']}")
             if nav["pos_idx"] == nav["target_idx"] or nav["steps"] >= nav["max_steps"]:
                 self._queue_nav_timer = None
                 self._finish_queue_navigation(reached=False)
@@ -1281,9 +1314,12 @@ class SpotifyMiniWindow(Gtk.Window):
             # kick playback and retry the same step
             nav["retries"] += 1
             if nav["retries"] > self.QUEUE_NAV_MAX_RETRIES:
+                # Spotify keeps refusing skips (it throttles many quick skips for a minute or two)
+                nav["throttled"] = True
                 self._queue_nav_timer = None
                 self._finish_queue_navigation(reached=False)
                 return False
+            dlog(f"nav step ignored (retry {nav['retries']}), kicking Play; pos={nav['pos_idx']} target={nav['target_idx']}")
             self.mpris.play()
             nav["kick_at"] = now + self.QUEUE_NAV_KICK_DELAY
         return True
@@ -1303,12 +1339,45 @@ class SpotifyMiniWindow(Gtk.Window):
         if nav.get("restore_shuffle"):
             self.mpris.set_shuffle(True)
         if nav.get("restore_volume") is not None:
-            self.mpris.set_volume(nav["restore_volume"])
+            self._restore_volume(nav["restore_volume"])
 
+        dlog(f"nav finish reached={reached} now='{self.mpris.get_fresh_track_info()[1]}' steps={nav['steps']} "
+             f"secs={time.time() - nav['started_at']:.1f}")
         if not reached:
             print(f"Queue navigation did not reach {nav.get('target_uri')}", flush=True)
         if resync:
             self._apply_metadata(track_changed=True)
+        if nav.get("throttled"):
+            self._flash_status(t("skip_limited"))
+
+    def _restore_volume(self, vol, attempts=5):
+        """Spotify may drop a volume change issued right around a pause/track change:
+        set it, then verify and re-apply a few times."""
+        self.mpris.set_volume(vol)
+        left = [attempts]
+
+        def verify():
+            cur = self.mpris.get_volume()
+            if abs(cur - vol) > 0.01 and left[0] > 0:
+                left[0] -= 1
+                dlog(f"volume restore: Spotify reports {cur:.2f}, re-applying {vol:.2f}")
+                self.mpris.set_volume(vol)
+                return True
+            return False
+
+        GLib.timeout_add(400, verify)
+
+    def _flash_status(self, text, duration_ms=4500):
+        """Shows a short notice in place of the artist line."""
+        self.artist_label.set_text(text)
+        self.artist_label.set_tooltip_text(text)
+        self.show_osd(duration_ms, force=True)
+
+        def restore():
+            self._apply_metadata(track_changed=False)
+            return False
+
+        GLib.timeout_add(duration_ms, restore)
 
     def play_track_silent(self, uri):
         if not uri:
@@ -1471,6 +1540,7 @@ class SpotifyMiniWindow(Gtk.Window):
     def _on_queue_track_clicked(self, uri):
         if not uri:
             return
+        dlog(f"queue click uri={uri}")
 
         # Cancel any pending queue click debounce
         if getattr(self, "_queue_click_debounce_id", None):
@@ -1766,8 +1836,19 @@ class SpotifyMiniWindow(Gtk.Window):
         own_xid = surface.get_xid() if isinstance(surface, GdkX11.X11Surface) else 0
         # Spotify counts as "on screen" only when it is focused or really visible, not when it is
         # merely restored but buried under other windows.
-        sp_on_screen = is_spotify_active() or spotify_visible_fraction(own_xid) >= self.SPOTIFY_VISIBLE_THRESHOLD
-        forced_show = time.time() < self._forced_show_until
+        sp_active = is_spotify_active()
+        sp_on_screen = sp_active or spotify_visible_fraction(own_xid) >= self.SPOTIFY_VISIBLE_THRESHOLD
+        # An explicit show keeps the HUD up while Spotify is merely visible somewhere on screen,
+        # but never once the user is actually working in the Spotify window.
+        forced_show = time.time() < self._forced_show_until and not sp_active
+        if sp_on_screen and self.get_visible():
+            reasons = (self.is_hovered, self.is_scrubbing, forced_show)
+            if reasons != getattr(self, "_last_hide_reasons", None):
+                self._last_hide_reasons = reasons
+                dlog(f"poll: spotify on screen (active={sp_active}) while HUD visible; "
+                     f"hovered={reasons[0]} scrubbing={reasons[1]} forced={reasons[2]} pinned={self.is_pinned}")
+        else:
+            self._last_hide_reasons = None
 
         if sp_on_screen:
             # If Spotify desktop is open on screen, hide the mini player (unless user is actively scrubbing or hovering it,
@@ -1777,6 +1858,7 @@ class SpotifyMiniWindow(Gtk.Window):
                 self._cancel_fade()
                 self._was_pinned_before_spotify = self.is_pinned
                 self._hidden_due_to_spotify = True
+                dlog("poll: hiding HUD because Spotify is on screen")
                 self.set_visible(False)
         else:
             # Spotify desktop is minimized or closed
@@ -2048,6 +2130,7 @@ class SpotifyMiniWindow(Gtk.Window):
         self._last_media_key_time = now
 
         key_str = str(key).strip().lower()
+        dlog(f"media action key={key_str} handled={handled}")
         if key_str in ("next", "nexttrack", "previous", "prev", "prevtrack"):
             if handled:
                 # Someone else skipped (media key, playerctl, ...): abort our own walk, follow Spotify
@@ -2080,8 +2163,14 @@ class SpotifyMiniWindow(Gtk.Window):
 
     def show_osd(self, duration_ms=4500, force=False):
         # If user is working actively in Spotify, do NOT pop up unless forced
+        try:
+            caller = sys._getframe(1).f_code.co_name
+        except Exception:
+            caller = "?"
         if not force and is_spotify_active():
+            dlog(f"show_osd skipped (spotify active) caller={caller}")
             return
+        dlog(f"show_osd force={force} dur={duration_ms} caller={caller} pinned={self.is_pinned}")
         if force:
             # Explicit user action: keep the HUD up for its display time even if Spotify is on screen
             self._forced_show_until = time.time() + duration_ms / 1000.0
@@ -2154,6 +2243,7 @@ class SpotifyMiniWindow(Gtk.Window):
             step += 1
             t = step / float(total_steps)
             if t >= 1.0:
+                dlog("autohide: faded out")
                 self.set_opacity(0.0)
                 self.set_visible(False)
                 self.fade_timer_id = None
