@@ -172,6 +172,13 @@ scale.vol-scale:active slider {
     opacity: 0.85;
 }
 
+
+.queue-loading-spinner {
+    color: #1ed760;
+    min-width: 16px;
+    min-height: 16px;
+}
+
 scale.seek-bar.loading,
 .time-label.loading {
     opacity: 0.35;
@@ -544,4 +551,11 @@ button.version-link:hover label,
 .version-link:hover label {
     color: #1ed760;
     text-decoration: none;
+}
+
+/* Queue entry picked by the user while Spotify is moved to it (defined last to win over hover) */
+.queue-row.queue-row-picked,
+.queue-history-row.queue-row-picked {
+    background-color: rgba(30, 215, 96, 0.14);
+    border-color: rgba(30, 215, 96, 0.35);
 }

@@ -1024,7 +1024,36 @@ class SpotifyMiniWindow(Gtk.Window):
         if getattr(self, "is_queue_hovered", False):
             self._user_scrolled_queue = True
 
-    def _scroll_to_current_track(self):
+    def _animate_queue_scroll(self, target_y, duration=0.32):
+        """Smoothly scrolls the queue to target_y (ease-out); a new target retargets the animation."""
+        adj = self.queue_scroll.get_vadjustment()
+        start = adj.get_value()
+        if abs(target_y - start) < 1.0:
+            return
+        self._scroll_anim = {"start": start, "target": target_y, "t0": time.time(), "dur": duration}
+        if not getattr(self, "_scroll_anim_id", None):
+            self._scroll_anim_id = GLib.timeout_add(16, self._scroll_anim_step)
+
+    def _scroll_anim_step(self):
+        anim = getattr(self, "_scroll_anim", None)
+        adj = self.queue_scroll.get_vadjustment() if getattr(self, "queue_scroll", None) else None
+        if not anim or not adj:
+            self._scroll_anim_id = None
+            return False
+        p = min(1.0, (time.time() - anim["t0"]) / anim["dur"])
+        ease = 1.0 - (1.0 - p) ** 3
+        self._ignore_scroll_event = True
+        try:
+            adj.set_value(anim["start"] + (anim["target"] - anim["start"]) * ease)
+        finally:
+            self._ignore_scroll_event = False
+        if p >= 1.0:
+            self._scroll_anim_id = None
+            self._scroll_anim = None
+            return False
+        return True
+
+    def _scroll_to_current_track(self, animate=False, _retry=0):
         if not hasattr(self, "queue_scroll") or not self.queue_scroll:
             return False
         adj = self.queue_scroll.get_vadjustment()
@@ -1039,11 +1068,17 @@ class SpotifyMiniWindow(Gtk.Window):
         if hasattr(self, "curr_row") and self.curr_row and hasattr(self, "queue_list_box") and self.queue_list_box:
             try:
                 ok, rect = self.curr_row.compute_bounds(self.queue_list_box)
-                if ok and rect.size.height > 0:
+                # A freshly rebuilt row reports y < 0 until GTK has allocated it
+                if ok and rect.size.height > 0 and rect.origin.y >= 0:
                     row_center = rect.origin.y + (rect.size.height / 2.0)
                     target_y = row_center - (viewport_h / 2.0)
             except Exception:
                 target_y = None
+
+        if target_y is None and animate and _retry < 30:
+            # Wait for the layout instead of scrolling to an estimated position
+            GLib.timeout_add(50, lambda: self._scroll_to_current_track(animate=True, _retry=_retry + 1))
+            return False
 
         if target_y is None:
             is_loop = getattr(self.mpris, "loop_status", "Playlist") != "None"
@@ -1059,6 +1094,11 @@ class SpotifyMiniWindow(Gtk.Window):
         else:
             final_y = max(0.0, target_y)
 
+        if animate:
+            self._animate_queue_scroll(final_y)
+            return False
+        if getattr(self, "_scroll_anim_id", None):
+            return False  # a smooth scroll is in progress; it already heads to the current track
         self._ignore_scroll_event = True
         try:
             adj.set_value(final_y)
@@ -1180,6 +1220,48 @@ class SpotifyMiniWindow(Gtk.Window):
             # Never leave "Loading track…" behind, even when the walk was aborted
             self._apply_metadata(track_changed=False)
 
+    def _preview_queue_pick(self, uri, t_item, target_idx):
+        """Queue feedback for a picked entry: highlight it with a spinner and smoothly scroll it to
+        the centre, then rebuild the list with it as the current track (it stays centred)."""
+        delay = 0
+        entry = getattr(self, "_queue_rows", {}).get(uri) if getattr(self, "is_queue_open", False) else None
+        if entry:
+            row, hint = entry
+            try:
+                row.add_css_class("queue-row-picked")
+                if hint:
+                    hint.set_visible(False)
+                spinner = Gtk.Spinner()
+                spinner.add_css_class("queue-loading-spinner")
+                spinner.start()
+                row.append(spinner)
+                ok, rect = row.compute_bounds(self.queue_list_box)
+                if ok and rect.size.height > 0 and rect.origin.y >= 0:
+                    adj = self.queue_scroll.get_vadjustment()
+                    page = adj.get_page_size() or 190.0
+                    target = rect.origin.y + rect.size.height / 2.0 - page / 2.0
+                    target = max(0.0, min(target, max(0.0, adj.get_upper() - page)))
+                    self._user_scrolled_queue = False
+                    self._animate_queue_scroll(target, duration=0.35)
+                    delay = 400
+            except Exception as e:
+                dlog(f"queue pick preview error: {e!r}")
+
+        def promote():
+            nav = self._queue_nav
+            if not getattr(self, "_loading", False) or not nav or nav.get("target_uri") != uri:
+                return False
+            self.queue_mgr.current_track = dict(t_item, track_num=target_idx + 1)
+            self.queue_mgr.last_valid_idx = target_idx
+            self._force_queue_center = True
+            self._rebuild_queue_ui(order_changed=False)
+            return False
+
+        if delay:
+            GLib.timeout_add(delay, promote)
+        else:
+            promote()
+
     def _is_navigating(self):
         return self._queue_nav is not None or time.time() < self._window_poll_pause_until
 
@@ -1248,6 +1330,7 @@ class SpotifyMiniWindow(Gtk.Window):
         t_item = tracks[target_idx]
         self._reset_progress_ui()
         self._set_loading(True, t_item)
+        self._preview_queue_pick(uri, t_item, target_idx)
 
         now = time.time()
         self._queue_nav = {
@@ -1421,6 +1504,7 @@ class SpotifyMiniWindow(Gtk.Window):
         if nav.get("restore_volume") is not None:
             self._restore_volume(nav["restore_volume"])
         if getattr(self, "_loading", False):
+            self._force_queue_center = True
             self._set_loading(False)
 
         dlog(f"nav finish reached={reached} mode={nav.get('mode')} now='{self.mpris.get_fresh_track_info()[1]}' steps={nav['steps']} "
@@ -1661,6 +1745,7 @@ class SpotifyMiniWindow(Gtk.Window):
             self.queue_list_box.remove(child)
 
         self.curr_row = None
+        self._queue_rows = {}  # uri -> (row, hint icon), used to animate a picked entry
         is_loop = getattr(self.mpris, "loop_status", "Playlist") != "None"
         past_tracks = self.queue_mgr.get_past_tracks(limit=40, loop=is_loop)
         upcoming_tracks = self.queue_mgr.get_upcoming_tracks(limit=60, loop=is_loop)
@@ -1762,6 +1847,7 @@ class SpotifyMiniWindow(Gtk.Window):
                 click = Gtk.GestureClick()
                 click.connect("released", lambda g, n, x, y, u=uri: self._on_queue_track_clicked(u))
                 row.add_controller(click)
+                self._queue_rows[uri] = (row, h_icon)
 
                 self.queue_list_box.append(row)
 
@@ -1801,13 +1887,19 @@ class SpotifyMiniWindow(Gtk.Window):
         self.curr_row.append(info_box)
 
         status_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        eq_icon = Gtk.Image.new_from_icon_name("audio-speakers-symbolic")
-        eq_icon.add_css_class("queue-current-icon")
-        status_box.append(eq_icon)
+        if getattr(self, "_loading", False):
+            row_spinner = Gtk.Spinner()
+            row_spinner.add_css_class("queue-loading-spinner")
+            row_spinner.start()
+            status_box.append(row_spinner)
+        else:
+            eq_icon = Gtk.Image.new_from_icon_name("audio-speakers-symbolic")
+            eq_icon.add_css_class("queue-current-icon")
+            status_box.append(eq_icon)
 
-        badge = Gtk.Label(label=t("playing"))
-        badge.add_css_class("queue-playing-badge")
-        status_box.append(badge)
+            badge = Gtk.Label(label=t("playing"))
+            badge.add_css_class("queue-playing-badge")
+            status_box.append(badge)
 
         self.curr_row.append(status_box)
 
@@ -1874,13 +1966,22 @@ class SpotifyMiniWindow(Gtk.Window):
                 click = Gtk.GestureClick()
                 click.connect("released", lambda g, n, x, y, u=uri: self._on_queue_track_clicked(u))
                 row.add_controller(click)
+                self._queue_rows[uri] = (row, play_hint)
 
                 self.queue_list_box.append(row)
 
         # Center scroll on current track if appropriate, otherwise preserve user's scroll position
         # NEVER disturb user scroll position if they are hovering or scrolled the queue
         user_interacting = getattr(self, "is_queue_hovered", False) or getattr(self, "_user_scrolled_queue", False)
-        should_center = (
+        force_center = getattr(self, "_force_queue_center", False)
+        self._force_queue_center = False
+        if force_center:
+            # A track was picked in the queue: bring it to the centre even though the pointer is over the list
+            self._user_scrolled_queue = False
+            GLib.idle_add(lambda: self._scroll_to_current_track(animate=True))
+            GLib.timeout_add(60, lambda: self._scroll_to_current_track(animate=True))
+            GLib.timeout_add(160, lambda: self._scroll_to_current_track(animate=True))
+        should_center = not force_center and (
             not user_interacting and (
                 order_changed or 
                 track_changed or 
