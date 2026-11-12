@@ -410,6 +410,13 @@ class MPRISManager:
             except Exception as e:
                 print(f"PlayPause failed: {e}")
 
+    def play(self):
+        if self.player_proxy:
+            try:
+                self.player_proxy.call_sync("Play", None, Gio.DBusCallFlags.NONE, -1, None)
+            except Exception as e:
+                print(f"Play failed: {e}")
+
     def pause(self):
         if self.player_proxy:
             try:

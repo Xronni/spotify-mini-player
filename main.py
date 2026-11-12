@@ -1091,8 +1091,10 @@ class SpotifyMiniWindow(Gtk.Window):
     SPOTIFY_VISIBLE_THRESHOLD = 0.15  # share of the Spotify window that must be uncovered
 
     QUEUE_NAV_MAX_STEPS = 150
-    QUEUE_NAV_STEP_TIMEOUT = 1.5
-    QUEUE_NAV_MAX_RETRIES = 4
+    QUEUE_NAV_STEP_TIMEOUT = 0.9   # s to wait for Spotify to switch after a step
+    QUEUE_NAV_KICK_DELAY = 0.35    # s between a Play "kick" and the retried step
+    QUEUE_NAV_MAX_RETRIES = 4      # ignored steps in a row before giving up
+    QUEUE_NAV_MAX_TIME = 30.0      # hard limit for one walk
 
     def _reset_progress_ui(self):
         self.anchor_pos = 0.0
@@ -1125,7 +1127,12 @@ class SpotifyMiniWindow(Gtk.Window):
         return self.queue_mgr._extract_id(uri), (title or "").strip().casefold()
 
     def _navigate_to_queue_track(self, uri):
-        """Moves Spotify to the clicked queue entry by stepping Next/Previous."""
+        """Moves Spotify to the clicked queue entry by stepping Next/Previous.
+
+        Spotify ignores Next/Previous while the loaded track has not started playing (e.g. paused
+        at 0:00, or stalled after many quick skips), so playback is kicked with Play before the
+        walk and whenever a step is ignored. After every landing the position is re-derived from
+        the track Spotify actually reports, so slow, doubled or skipped steps self-correct."""
         if not uri or not self.mpris.is_available:
             return
         self._finish_queue_navigation(reached=False, resync=False)
@@ -1142,7 +1149,10 @@ class SpotifyMiniWindow(Gtk.Window):
 
         offset = target_idx - cur_idx
         if offset == 0:
+            # Clicked the current track: play it from the start
             self.mpris.set_position(0)
+            if self.mpris.playback_status != "Playing":
+                self.mpris.play()
             self._reset_progress_ui()
             return
         if abs(offset) > self.QUEUE_NAV_MAX_STEPS:
@@ -1162,23 +1172,28 @@ class SpotifyMiniWindow(Gtk.Window):
         self.artist_label.set_tooltip_text(artist_text)
         self._reset_progress_ui()
 
-        steps = abs(offset)
+        now = time.time()
         self._queue_nav = {
             "target_key": target_key,
             "target_uri": uri,
+            "target_idx": target_idx,
             "target_title": (t_item.get("title") or "").strip().casefold(),
-            "direction": 1 if offset > 0 else -1,
-            "steps_left": steps + 3,  # small slack for order mismatches
+            "pos_idx": cur_idx,          # where we believe Spotify is in our list
+            "direction": 0,              # direction of the last issued step
+            "steps": 0,
+            "max_steps": abs(offset) * 2 + 10,
             "last_key": self._fresh_track_key_and_title()[0],
-            "issued_at": 0.0,
+            "issued_at": now,
+            "kick_at": None,
             "retries": 0,
+            "started_at": now,
             "restore_volume": None,
             "restore_shuffle": False,
         }
 
-        if steps > 1:
+        if abs(offset) > 1:
             # Mute while skipping through intermediate tracks
-            vol = self.current_volume
+            vol = self.mpris.get_volume()
             if vol > 0.0:
                 self._queue_nav["restore_volume"] = vol
                 self.mpris.set_volume(0.0)
@@ -1189,19 +1204,27 @@ class SpotifyMiniWindow(Gtk.Window):
             self._queue_nav["restore_shuffle"] = True
             self.mpris.set_shuffle(False)
 
-        if offset < 0:
-            # Spotify's Previous restarts the track when it is past ~3s
-            self.mpris.set_position(0)
-        self._queue_nav_step()
+        if self.mpris.playback_status != "Playing":
+            # A paused / not yet started track makes Spotify drop skip commands
+            self.mpris.play()
+            self._queue_nav["kick_at"] = now + self.QUEUE_NAV_KICK_DELAY
+        else:
+            if offset < 0:
+                # Spotify's Previous restarts the track when it is past ~3s
+                self.mpris.set_position(0)
+            self._queue_nav_step()
         self._queue_nav_timer = GLib.timeout_add(50, self._on_queue_nav_poll)
 
     def _queue_nav_step(self):
         nav = self._queue_nav
         if not nav:
             return
+        remaining = nav["target_idx"] - nav["pos_idx"]
+        direction = 1 if remaining > 0 else -1
+        nav["direction"] = direction
         nav["issued_at"] = time.time()
-        nav["steps_left"] -= 1
-        if nav["direction"] > 0:
+        nav["steps"] += 1
+        if direction > 0:
             self.mpris.next()
         else:
             self.mpris.previous()
@@ -1220,6 +1243,22 @@ class SpotifyMiniWindow(Gtk.Window):
         if not nav:
             self._queue_nav_timer = None
             return False
+        now = time.time()
+
+        if now - nav["started_at"] > self.QUEUE_NAV_MAX_TIME:
+            self._queue_nav_timer = None
+            self._finish_queue_navigation(reached=False)
+            return False
+
+        if nav["kick_at"] is not None:
+            # Waiting for Play to take effect before (re)issuing the step
+            if now < nav["kick_at"]:
+                return True
+            nav["kick_at"] = None
+            if nav["steps"] == 0 and nav["target_idx"] < nav["pos_idx"]:
+                self.mpris.set_position(0)
+            self._queue_nav_step()
+            return True
 
         key, title = self._fresh_track_key_and_title()
         if key != nav["last_key"]:
@@ -1229,19 +1268,24 @@ class SpotifyMiniWindow(Gtk.Window):
                 self._queue_nav_timer = None
                 self._finish_queue_navigation(reached=True)
                 return False
-            if nav["steps_left"] <= 0:
+            # Re-derive our position from what Spotify actually plays (self-correcting walk)
+            idx = self.queue_mgr._find_track_idx(key, title)
+            nav["pos_idx"] = idx if idx >= 0 else nav["pos_idx"] + nav["direction"]
+            if nav["pos_idx"] == nav["target_idx"] or nav["steps"] >= nav["max_steps"]:
                 self._queue_nav_timer = None
                 self._finish_queue_navigation(reached=False)
                 return False
             self._queue_nav_step()
-        elif time.time() - nav["issued_at"] > self.QUEUE_NAV_STEP_TIMEOUT:
-            # Spotify ignored the call (or Previous only restarted the track) -> repeat it
+        elif now - nav["issued_at"] > self.QUEUE_NAV_STEP_TIMEOUT:
+            # Step ignored (track stalled / not started, or Previous only restarted it):
+            # kick playback and retry the same step
             nav["retries"] += 1
-            if nav["retries"] > self.QUEUE_NAV_MAX_RETRIES or nav["steps_left"] <= 0:
+            if nav["retries"] > self.QUEUE_NAV_MAX_RETRIES:
                 self._queue_nav_timer = None
                 self._finish_queue_navigation(reached=False)
                 return False
-            self._queue_nav_step()
+            self.mpris.play()
+            nav["kick_at"] = now + self.QUEUE_NAV_KICK_DELAY
         return True
 
     def _finish_queue_navigation(self, reached=False, resync=True):
@@ -1262,7 +1306,7 @@ class SpotifyMiniWindow(Gtk.Window):
             self.mpris.set_volume(nav["restore_volume"])
 
         if not reached:
-            print(f"Queue navigation did not reach {nav.get('target_uri')}")
+            print(f"Queue navigation did not reach {nav.get('target_uri')}", flush=True)
         if resync:
             self._apply_metadata(track_changed=True)
 
@@ -1715,7 +1759,7 @@ class SpotifyMiniWindow(Gtk.Window):
         GLib.idle_add(_show_list_and_hide_spinner)
 
     def _on_poll_window_state(self):
-        if self._is_navigating():
+        if time.time() < self._window_poll_pause_until:
             return True
 
         surface = self.get_surface()
