@@ -522,6 +522,38 @@ class MPRISManager:
     def toggle_shuffle(self):
         self.set_shuffle(not self.shuffle)
 
+    def advance_by_seeking_to_end(self, margin_us=600_000):
+        """Moves to the next track by seeking to the very end of the current one, so Spotify
+        advances by itself like at a natural track end. Unlike Next this is not counted as a
+        skip: it keeps working when Spotify refuses Next after ~100 quick skips."""
+        if not self.props_proxy or not self.player_proxy:
+            return False
+        try:
+            meta = self.props_proxy.call_sync(
+                "Get", GLib.Variant("(ss)", (PLAYER_INTERFACE, "Metadata")),
+                Gio.DBusCallFlags.NONE, -1, None
+            ).unpack()[0]
+            tid = meta.get("mpris:trackid", "")
+            length = int(meta.get("mpris:length", 0) or 0)
+            if not tid or length <= margin_us:
+                return False
+            self.player_proxy.call_sync("SetPosition", GLib.Variant("(ox)", (tid, length - margin_us)),
+                                        Gio.DBusCallFlags.NONE, -1, None)
+            self.player_proxy.call_sync("Play", None, Gio.DBusCallFlags.NONE, -1, None)
+            return True
+        except Exception as e:
+            print(f"advance_by_seeking_to_end failed: {e}")
+            return False
+
+    def set_loop_status(self, mode):
+        if self.props_proxy:
+            try:
+                params = GLib.Variant("(ssv)", (PLAYER_INTERFACE, "LoopStatus", GLib.Variant("s", mode)))
+                self.props_proxy.call_sync("Set", params, Gio.DBusCallFlags.NONE, -1, None)
+                self.loop_status = mode
+            except Exception as e:
+                print(f"set_loop_status failed: {e}")
+
     def cycle_loop_status(self):
         modes = ["None", "Playlist", "Track"]
         curr = self.loop_status if self.loop_status in modes else "None"

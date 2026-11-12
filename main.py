@@ -488,6 +488,7 @@ class SpotifyMiniWindow(Gtk.Window):
         self._queue_nav_timer = None
         self._window_poll_pause_until = 0.0
         self._forced_show_until = 0.0
+        self._skip_throttled_until = 0.0
         self._was_pinned_before_spotify = False
 
         # Queue Manager
@@ -1108,7 +1109,9 @@ class SpotifyMiniWindow(Gtk.Window):
     QUEUE_NAV_STEP_TIMEOUT = 0.9   # s to wait for Spotify to switch after a step
     QUEUE_NAV_KICK_DELAY = 0.35    # s between a Play "kick" and the retried step
     QUEUE_NAV_MAX_RETRIES = 4      # ignored steps in a row before giving up
-    QUEUE_NAV_MAX_TIME = 30.0      # hard limit for one walk
+    QUEUE_NAV_MAX_TIME = 90.0      # hard limit for one walk
+    QUEUE_NAV_SEEK_TIMEOUT = 3.0   # s to wait for a seek-to-end transition
+    SKIP_THROTTLE_COOLDOWN = 150.0 # s Spotify keeps refusing Next after ~100 quick skips
 
     def _reset_progress_ui(self):
         self.anchor_pos = 0.0
@@ -1211,6 +1214,10 @@ class SpotifyMiniWindow(Gtk.Window):
             "started_at": now,
             "restore_volume": None,
             "restore_shuffle": False,
+            "restore_loop": None,
+            # "skip": Next/Previous (fast, ~100 per window); "seek": seek to the track end and let
+            # Spotify advance by itself (not counted as a skip, forward only)
+            "mode": "seek" if (offset > 0 and now < self._skip_throttled_until) else "skip",
         }
 
         if abs(offset) > 1:
@@ -1225,6 +1232,11 @@ class SpotifyMiniWindow(Gtk.Window):
             # walk so Next/Previous follow the playlist order, then turn it back on.
             self._queue_nav["restore_shuffle"] = True
             self.mpris.set_shuffle(False)
+
+        if offset > 0 and self.mpris.loop_status == "Track":
+            # Repeat-one would replay the same track instead of advancing
+            self._queue_nav["restore_loop"] = "Track"
+            self.mpris.set_loop_status("Playlist")
 
         if self.mpris.playback_status != "Playing":
             # A paused / not yet started track makes Spotify drop skip commands
@@ -1247,7 +1259,10 @@ class SpotifyMiniWindow(Gtk.Window):
         nav["issued_at"] = time.time()
         nav["steps"] += 1
         if direction > 0:
-            self.mpris.next()
+            if nav["mode"] == "seek":
+                self.mpris.advance_by_seeking_to_end()
+            else:
+                self.mpris.next()
         else:
             self.mpris.previous()
 
@@ -1309,13 +1324,24 @@ class SpotifyMiniWindow(Gtk.Window):
                 self._finish_queue_navigation(reached=False)
                 return False
             self._queue_nav_step()
-        elif now - nav["issued_at"] > self.QUEUE_NAV_STEP_TIMEOUT:
+        elif now - nav["issued_at"] > (self.QUEUE_NAV_SEEK_TIMEOUT if nav["mode"] == "seek" else self.QUEUE_NAV_STEP_TIMEOUT):
+            if nav["mode"] == "skip" and nav["direction"] > 0:
+                # Spotify refuses Next (it allows ~100 quick skips, then blocks them for a while).
+                # Continue forward by seeking to the track end: not counted as a skip.
+                self._skip_throttled_until = now + self.SKIP_THROTTLE_COOLDOWN
+                nav["mode"] = "seek"
+                nav["retries"] = 0
+                dlog(f"nav: Next refused, switching to seek-to-end mode; pos={nav['pos_idx']} target={nav['target_idx']}")
+                self._queue_nav_step()
+                return True
             # Step ignored (track stalled / not started, or Previous only restarted it):
             # kick playback and retry the same step
             nav["retries"] += 1
             if nav["retries"] > self.QUEUE_NAV_MAX_RETRIES:
                 # Spotify keeps refusing skips (it throttles many quick skips for a minute or two)
                 nav["throttled"] = True
+                if nav["mode"] == "skip":
+                    self._skip_throttled_until = now + self.SKIP_THROTTLE_COOLDOWN
                 self._queue_nav_timer = None
                 self._finish_queue_navigation(reached=False)
                 return False
@@ -1338,10 +1364,12 @@ class SpotifyMiniWindow(Gtk.Window):
 
         if nav.get("restore_shuffle"):
             self.mpris.set_shuffle(True)
+        if nav.get("restore_loop"):
+            self.mpris.set_loop_status(nav["restore_loop"])
         if nav.get("restore_volume") is not None:
             self._restore_volume(nav["restore_volume"])
 
-        dlog(f"nav finish reached={reached} now='{self.mpris.get_fresh_track_info()[1]}' steps={nav['steps']} "
+        dlog(f"nav finish reached={reached} mode={nav.get('mode')} now='{self.mpris.get_fresh_track_info()[1]}' steps={nav['steps']} "
              f"secs={time.time() - nav['started_at']:.1f}")
         if not reached:
             print(f"Queue navigation did not reach {nav.get('target_uri')}", flush=True)
